@@ -185,6 +185,7 @@ class WorkerGroup:
         Returns:
             List[str]: List of method names that were successfully bound
         """
+        print(f"BIND WORKER METHOD {user_defined_cls} {func_generator}")
         method_names = []
         for method_name in dir(user_defined_cls):
             try:
@@ -238,11 +239,12 @@ class WorkerGroup:
                     execute_fn=execute_fn,
                     blocking=blocking,
                 )
+                print(f"FUNCTION GENERATOR IS RETURNING {func}")
 
                 try:
                     setattr(self, method_name, func)
                     method_names.append(method_name)
                 except Exception as e:
                     raise ValueError(f"Fail to set method_name {method_name}") from e
-
+        print(f"BIND WORKER METHOD METHOD NAMES {method_names}")
         return method_names

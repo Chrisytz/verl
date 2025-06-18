@@ -23,7 +23,7 @@ from unittest.mock import patch
 import ray
 from ray.experimental.state.api import get_actor
 from ray.util import list_named_actors
-from ray.util.placement_group import PlacementGroup, placement_group
+from ray.util.placement_group import PlacementGroup, placement_group, placement_group_table
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy, PlacementGroupSchedulingStrategy
 
 from verl.protocol import DataProto, _padding_size_key
@@ -40,14 +40,19 @@ def get_random_string(length: int) -> str:
     letters_digits = string.ascii_letters + string.digits
     return "".join(random.choice(letters_digits) for _ in range(length))
 
-
+# calls execute_fn (which in our case is RayWorkerGroup.execute_all, which eventually calls RayWorkerGroup._execute_remote_single_worker)
 def func_generator(self, method_name, dispatch_fn, collect_fn, execute_fn, blocking):
     class Functor:
         def __call__(this, *args, **kwargs):
+            print("FUNC GENERALTOR FUNCTOR CALL ARGUMENTS")
+            print(f"dispatch_fn {dispatch_fn}")
+            print(f"collect fn {collect_fn}")
+            print(f"execute fn {execute_fn}")
             args, kwargs = dispatch_fn(self, *args, **kwargs)
             padding_count = kwargs.pop(_padding_size_key, 0)
             output = execute_fn(method_name, *args, **kwargs)
             if blocking:
+                print("BLOCKINGGGGG")
                 output = ray.get(output)
             output = collect_fn(self, output)
             if padding_count > 0:
@@ -56,9 +61,12 @@ def func_generator(self, method_name, dispatch_fn, collect_fn, execute_fn, block
                     output = output.select_idxs(indices)
                 elif isinstance(output, list):
                     output = output[:-padding_count]
+            print(f"output {output}")
             return output
 
     # use class type to pass the method_name to get a better observability
+    #* this returns a new dynamically created class with name `method_name` that inherits from Functor
+    #* the () immediately instantiates this newly created class
     return type(method_name, (Functor,), {})()
 
 
@@ -86,7 +94,8 @@ class RayResourcePool(ResourcePool):
     def __init__(
         self,
         process_on_nodes: Optional[List[int]] = None,
-        use_gpu: bool = True,
+        use_gpu: bool = False,
+        use_tpu: bool = True,
         name_prefix: str = None,
         max_colocate_count: int = 10,
         detached=False,
@@ -94,13 +103,14 @@ class RayResourcePool(ResourcePool):
     ) -> None:
         super().__init__(process_on_nodes, max_colocate_count)
         self.use_gpu = use_gpu
+        self.use_tpu = use_tpu
         # print(f"in RayProcessDispatchConfiguration: name_prefix = {name_prefix}")
         self.name_prefix = get_random_string(length=6) if name_prefix is None else name_prefix
         self.pgs = None
         self.detached = detached
         self.accelerator_type = accelerator_type
 
-    def get_placement_groups(self, strategy="STRICT_PACK", name=None, device_name="cuda"):
+    def get_placement_groups(self, strategy="STRICT_PACK", name=None, device_name="tpu"):
         if self.pgs is not None:
             return self.pgs
 
@@ -110,21 +120,32 @@ class RayResourcePool(ResourcePool):
             device_name = "NPU"
         elif device_name == "cuda":
             device_name = "GPU"
+        elif device_name == "tpu":
+            device_name = "TPU"
 
         bundle = {"CPU": self.max_colocate_count}
         if self.use_gpu:
             bundle[device_name] = 1
             if self.accelerator_type is not None:
                 bundle[self.accelerator_type] = 1e-4
+        if self.use_tpu:
+            bundle[device_name] = 1
+        
+        print(f"bundle {bundle}")
         pg_scheme = [[bundle.copy() for _ in range(process_count)] for process_count in self._store]
 
+        print(f"pg scheme {pg_scheme}")
         lifetime = "detached" if self.detached else None
 
         pgs = [placement_group(bundles=bundles, strategy=strategy, name=pg_name_prefix + str(idx), lifetime=lifetime) for idx, bundles in enumerate(pg_scheme)]
 
+        print(f"pgs {pgs}")
         ray.get([pg.ready() for pg in pgs])
 
+        print([placement_group_table(pg) for pg in pgs])
+
         self.pgs = pgs
+        print(f"GET_PLACEMENT_GROUPS returning {pgs}")
         return pgs
 
 
@@ -189,7 +210,7 @@ class RayClassWithInitArgs(ClassWithInitArgs):
         """
         self._options.update(options)
 
-    def __call__(self, placement_group, placement_group_bundle_idx, use_gpu: bool = True, num_gpus=1, sharing_with=None, device_name="cuda") -> Any:
+    def __call__(self, placement_group, placement_group_bundle_idx, use_gpu: bool = False, use_tpu: bool = True, num_gpus=1, num_tpus=1, sharing_with=None, device_name="tpu") -> Any:
         """Create and return a Ray actor with the configured options.
 
         Args:
@@ -203,6 +224,7 @@ class RayClassWithInitArgs(ClassWithInitArgs):
         Returns:
             A Ray actor handle with the configured options
         """
+        print("RAY CLASS WITH INIT ARGS __CALL__")
         if sharing_with is not None:
             target_node_id = ray.get(sharing_with.get_node_id.remote())
             cuda_visible_devices = ray.get(sharing_with.get_cuda_visible_devices.remote())
@@ -216,6 +238,8 @@ class RayClassWithInitArgs(ClassWithInitArgs):
             options["num_gpus"] = num_gpus
         if use_gpu and device_name == "npu":
             options["resources"] = {"NPU": num_gpus}
+        if use_tpu and device_name == "tpu":
+            options["resources"] = {"TPU": num_tpus}
 
         if len(self._additional_resource) > 1:
             for k, v in self._additional_resource.items():
@@ -224,6 +248,7 @@ class RayClassWithInitArgs(ClassWithInitArgs):
         # print("cls:", self.cls)
         # print("args: ", self.args)
         # print("kwargs: ", self.kwargs)
+        print(self.cls)
         return self.cls.options(**options).remote(*self.args, **self.kwargs)
 
 
@@ -260,6 +285,8 @@ class RayWorkerGroup(WorkerGroup):
             ray_wait_register_center_timeout: Timeout for waiting on register center
             **kwargs: Additional keyword arguments
         """
+
+        print("RAY WORKER GROUP INIT")
         super().__init__(resource_pool=resource_pool, **kwargs)
         self.ray_cls_with_init = ray_cls_with_init
         self.name_prefix = get_random_string(length=6) if name_prefix is None else name_prefix
@@ -315,6 +342,7 @@ class RayWorkerGroup(WorkerGroup):
             bin_pack: Whether to use strict bin packing for resource allocation
             detached: Whether workers should be detached
         """
+        print("INIT WITH RESOURCE POOL")
         use_gpu = resource_pool.use_gpu
 
         strategy = "PACK"
@@ -329,6 +357,7 @@ class RayWorkerGroup(WorkerGroup):
         rank = -1
         local_world_size = resource_pool.store[0]
         for pg_idx, pg in enumerate(sort_placement_group_by_node_ip(pgs)):
+            print(f"PLACEMENT GROUP {pg_idx} {pg}")
             assert local_world_size <= pg.bundle_count, f"when generating for {self.name_prefix}, for the "
             for local_rank in range(local_world_size):
                 rank += 1
@@ -341,7 +370,9 @@ class RayWorkerGroup(WorkerGroup):
                     "WG_BACKEND": "ray",
                     "RAY_LOCAL_WORLD_SIZE": str(local_world_size),
                     "RAY_LOCAL_RANK": str(local_rank),
+                    "VERL_TORCH_TPU_AVAILABLE": os.environ.get("TORCH_TPU_AVAILABLE", "0")
                 }
+                print("poop", env_vars)
                 if rank != 0:
                     env_vars["MASTER_ADDR"] = self._master_addr
                     env_vars["MASTER_PORT"] = self._master_port
@@ -459,6 +490,7 @@ class RayWorkerGroup(WorkerGroup):
         return new_worker_group_dict
 
     def spawn_fused(self, prefix_set):
+        print("SPAWN_FUSED")
         """Create a dictionary of worker groups for fused workers.
 
         Args:
@@ -470,9 +502,12 @@ class RayWorkerGroup(WorkerGroup):
         wg_dict = dict()
         for key in prefix_set:
             new_wg = deepcopy(self)
+            print(self.ray_cls_with_init.cls.raw_cls_dict[key], func_generator)
             new_wg._bind_worker_method(self.ray_cls_with_init.cls.raw_cls_dict[key], func_generator)
             new_wg.sub_cls_name = key
             wg_dict[key] = new_wg
+        
+        print(wg_dict)
         return wg_dict
 
     def fuse(self, prefix_set):
@@ -499,8 +534,15 @@ class RayWorkerGroup(WorkerGroup):
         Returns:
             Remote object reference to the method execution
         """
+        #* the worker is the `FusedWorker` Ray actor (FusedWorker_actor_rollout_critic)
+        # self.fused_worker_execute_fn_name is `_fuw_execute`
+        # the get_attr retrives the ray actor method `FusedWorker_actor_rollout_critic._fuw_execute`
+        # finally remote_call.remote(...) executes the _fuw_execute method on the ray actor (FusedWorker_actor_rollout_critic) process
+        # the arguments inside the .remote(...) are passed to _fuw_execute (the remote_call)
+        print("EXECUTE REMOTE SINGLE WORKER", worker, self.fused_worker_execute_fn_name)
         if self.fused_worker_used and method_name not in self.method_names:
             remote_call = getattr(worker, self.fused_worker_execute_fn_name)
+            print(remote_call, f"{self.sub_cls_name}_fwmn_{method_name}")
             return remote_call.remote(f"{self.sub_cls_name}_fwmn_{method_name}", *args, **kwargs)
         # fused worker not used
         remote_call = getattr(worker, method_name)
@@ -586,6 +628,7 @@ class RayWorkerGroup(WorkerGroup):
         # and their lengths match len(self._workers), we'll distribute each
         # element in these lists to the corresponding worker
         # print(f"execute_all_async: method {method_name}({args}, {kwargs})")
+        print(f"RUNNING EXECUTE ALL ASYNC - WORKERS ARE {self._workers} {self._worker_names}")
         length = len(self._workers)
         if all(isinstance(arg, list) for arg in args) and all(isinstance(kwarg, list) for kwarg in kwargs.values()):
             if all(len(arg) == length for arg in args) and all(len(kwarg) == length for kwarg in kwargs.values()):
@@ -755,6 +798,8 @@ def create_colocated_worker_raw_cls(class_dict: dict[str, RayClassWithInitArgs])
     init_kwargs_dict = {cls_name: cia.kwargs for cls_name, cia in class_dict.items()}
     cls_names = list(class_dict.keys())
 
+    print(f"create colocated worker raw cls {raw_cls_dict}")
+
     # FusedWorker_Actor_Critic
     class_name_renamed = "_".join([FusedWorkerCLSName] + cls_names)
 
@@ -774,10 +819,14 @@ def create_colocated_worker_raw_cls(class_dict: dict[str, RayClassWithInitArgs])
                     self.fused_worker_dict[cls_name] = udc(*ud_args, **ud_kwargs)
                     setattr(self, cls_name, self.fused_worker_dict[cls_name])
 
+            print(f"FUSED WORKED DICT {self.fused_worker_dict}")
+
             # injecting fused_worker to each sub worker so they can be aware of existence of each other
             for _, worker in self.fused_worker_dict.items():
                 setattr(worker, Worker.fused_worker_attr_name, self.fused_worker_dict)
 
+        #* self.fused_worker_dict contains key: 'actor_rollout' or 'critic' and value: ActorRolloutRefWorker or CriticWorker objects
+        # so we use getattr to get the method_name from the object and then execute it
         def _fuw_execute(self, method_name: str, *args, **kwargs):
             # for fused_worker, method_name is in a form of "{cls_name}_fwmn_{method_name}"
             # where fwmn stands "fused worker method name"
@@ -787,6 +836,7 @@ def create_colocated_worker_raw_cls(class_dict: dict[str, RayClassWithInitArgs])
 
             assert cls_name in self.fused_worker_dict, f"calling {cls_name}'s {method_name}, but {cls_name} not in fused_worker_dict"
             udc_method = getattr(self.fused_worker_dict[cls_name], method_name)
+            print(f"_FUW_EXECUTE {names} {udc_method} {self.fused_worker_dict[cls_name]}")
             return udc_method(*args, **kwargs)
 
     renamed_fused_worker_cls = type(class_name_renamed, (FusedWorker,), {})
@@ -813,6 +863,7 @@ def create_colocated_worker_cls_fused(class_dict: dict[str, RayClassWithInitArgs
     raw_colocated_worker_cls = create_colocated_worker_raw_cls(class_dict)
 
     remote_cls = ray.remote(raw_colocated_worker_cls)
+    print(f"create colocated worker cls fused {remote_cls}")
     cia = RayClassWithInitArgs(cls=remote_cls)
     cia.fused_worker_used = True
 

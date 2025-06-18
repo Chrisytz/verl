@@ -40,7 +40,7 @@ from verl import DataProto
 from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
 from verl.single_controller.base import Worker
 from verl.single_controller.ray import RayClassWithInitArgs, RayResourcePool, RayWorkerGroup
-from verl.single_controller.ray.base import create_colocated_worker_cls
+from verl.single_controller.ray.base import create_colocated_worker_cls_fused
 from verl.trainer.ppo import core_algos
 from verl.trainer.ppo.core_algos import AdvantageEstimator, agg_loss
 from verl.trainer.ppo.metric_utils import (
@@ -84,6 +84,7 @@ class ResourcePoolManager:
 
     resource_pool_spec: dict[str, list[int]]
     mapping: dict[Role, str]
+    device: str
     resource_pool_dict: dict[str, RayResourcePool] = field(default_factory=dict)
 
     def create_resource_pool(self):
@@ -92,9 +93,10 @@ class ResourcePoolManager:
             # For FSDP backend, we recommend using max_colocate_count=1 that merge all WorkerGroups into one.
             # For Megatron backend, we recommend using max_colocate_count>1
             # that can utilize different WorkerGroup for differnt models
-            resource_pool = RayResourcePool(process_on_nodes=process_on_nodes, use_gpu=True, max_colocate_count=1, name_prefix=resource_pool_name)
+            resource_pool = RayResourcePool(process_on_nodes=process_on_nodes, use_tpu=True, max_colocate_count=1, name_prefix=resource_pool_name)
             self.resource_pool_dict[resource_pool_name] = resource_pool
 
+        print(f"RESOURCE_POOL_DICT {self.resource_pool_dict}")
         self._check_resource_available()
 
     def get_resource_pool(self, role: Role) -> RayResourcePool:
@@ -108,25 +110,34 @@ class ResourcePoolManager:
     def _check_resource_available(self):
         """Check if the resource pool can be satisfied in this ray cluster."""
         node_available_resources = ray.state.available_resources_per_node()
-        node_available_gpus = {node: node_info.get("GPU", 0) if "GPU" in node_info else node_info.get("NPU", 0) for node, node_info in node_available_resources.items()}
+        print(f"node available resources {node_available_resources}")
+        node_available_accelerators = {}
+        if self.device == "cuda":
+            node_available_accelerators = {node: node_info.get("GPU", 0) if "GPU" in node_info else node_info.get("NPU", 0) for node, node_info in node_available_resources.items()}
+        elif self.device == "tpu":
+            node_available_accelerators = {node: node_info.get("TPU", 0) for node, node_info in node_available_resources.items()}
+        
+        print(f"node available accelerators {node_available_accelerators}")
+
 
         # check total required gpus can be satisfied
-        total_available_gpus = sum(node_available_gpus.values())
-        total_required_gpus = sum([n_gpus for process_on_nodes in self.resource_pool_spec.values() for n_gpus in process_on_nodes])
-        if total_available_gpus < total_required_gpus:
-            raise ValueError(f"Total available GPUs {total_available_gpus} is less than total desired GPUs {total_required_gpus}")
+        if self.device == "cuda":
+            total_available_gpus = sum(node_available_accelerators.values())
+            total_required_gpus = sum([n_gpus for process_on_nodes in self.resource_pool_spec.values() for n_gpus in process_on_nodes])
+            if total_available_gpus < total_required_gpus:
+                raise ValueError(f"Total available GPUs {total_available_gpus} is less than total desired GPUs {total_required_gpus}")
 
-        # check each resource pool can be satisfied, O(#resource_pools * #nodes)
-        for resource_pool_name, process_on_nodes in self.resource_pool_spec.items():
-            num_gpus, num_nodes = process_on_nodes[0], len(process_on_nodes)
-            for node, available_gpus in node_available_gpus.items():
-                if available_gpus >= num_gpus:
-                    node_available_gpus[node] -= num_gpus
-                    num_nodes -= 1
-                    if num_nodes == 0:
-                        break
-            if num_nodes > 0:
-                raise ValueError(f"Resource pool {resource_pool_name}: {num_gpus}*{num_nodes}" + "cannot be satisfied in this ray cluster")
+            # check each resource pool can be satisfied, O(#resource_pools * #nodes)
+            for resource_pool_name, process_on_nodes in self.resource_pool_spec.items():
+                num_gpus, num_nodes = process_on_nodes[0], len(process_on_nodes)
+                for node, available_gpus in node_available_accelerators.items():
+                    if available_gpus >= num_gpus:
+                        node_available_accelerators[node] -= num_gpus
+                        num_nodes -= 1
+                        if num_nodes == 0:
+                            break
+                if num_nodes > 0:
+                    raise ValueError(f"Resource pool {resource_pool_name}: {num_gpus}*{num_nodes}" + "cannot be satisfied in this ray cluster")
 
 
 def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, kl_penalty="kl", multi_turn=False):
@@ -257,15 +268,14 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
     else:
         # handle all other adv estimator type other than GAE and GRPO
         adv_estimator_fn = core_algos.get_adv_estimator_fn(adv_estimator)
-        adv_kwargs = {
-            "token_level_rewards": data.batch["token_level_rewards"],
-            "response_mask": data.batch["response_mask"],
-            "config": config,
+        adv_kwargs = {"token_level_rewards": data.batch["token_level_rewards"],
+                      "response_mask": data.batch["response_mask"],
+                      "config": config,
         }
-        if "uid" in data.non_tensor_batch:  # optional
-            adv_kwargs["index"] = data.non_tensor_batch["uid"]
-        if "reward_baselines" in data.batch:  # optional
-            adv_kwargs["reward_baselines"] = data.batch["reward_baselines"]
+        if "uid" in data.non_tensor_batch: # optional
+            adv_kwargs['index'] = data.non_tensor_batch["uid"]
+        if "reward_baselines" in data.batch:# optional
+            adv_kwargs['reward_baselines'] = data.batch["reward_baselines"]
 
         # calculate advantage estimator
         advantages, returns = adv_estimator_fn(**adv_kwargs)
@@ -734,6 +744,7 @@ class RayPPOTrainer:
             rm_cls = RayClassWithInitArgs(self.role_worker_mapping[Role.RewardModel], config=self.config.reward_model)
             self.resource_pool_to_cls[resource_pool]["rm"] = rm_cls
 
+        print(f"RESOURCE_POOL_TO_CLS {self.resource_pool_to_cls}")
         # initialize WorkerGroup
         # NOTE: if you want to use a different resource pool for each role, which can support different parallel size,
         # you should not use `create_colocated_worker_cls`.
@@ -745,13 +756,31 @@ class RayPPOTrainer:
             wg_kwargs["ray_wait_register_center_timeout"] = self.config.trainer.ray_wait_register_center_timeout
 
         for resource_pool, class_dict in self.resource_pool_to_cls.items():
-            worker_dict_cls = create_colocated_worker_cls(class_dict=class_dict)
+            #* this is a RayClassWithInitArgs instance that wraps a Ray actor class of FusedWorker
+            worker_dict_cls = create_colocated_worker_cls_fused(class_dict=class_dict) 
+            print(f"worker dict cls {worker_dict_cls}")
+            #* this returns a RayWorkerGroup object. it runs the RayWorkerGroup.__init__ that calls 
+            # 1. RayClassWithInitArgs.__call__ which starts a new actor process, returns a handle to the ray actor and 
+            #    adds it to RayWorkerGroup._workers (our ray actor has the name FusedWorker_actor_rollout_critic)
+            # 2. RayWorkerGroup._bind_worker_method which binds methods from the Ray actor class of FusedWorker onto wg_dict
+            #    using func_generator
             wg_dict = self.ray_worker_group_cls(resource_pool=resource_pool, ray_cls_with_init=worker_dict_cls, device_name=self.device_name, **wg_kwargs)
+            #* wg_dict.spawn creates two (one for actor and one for critic) deep copies of wg_dict (RayWorkerGroup)
+            # and then binds methods from their respective classes onto the RayWorkerGroup copies
+            # note that while the ray actor handle (RayWorkerGroup._workers) was deep copied, the underlying ray actor itself is still the same
+            # meaning we still only have one ray actor
             spawn_wg = wg_dict.spawn(prefix_set=class_dict.keys())
             all_wg.update(spawn_wg)
 
+        #* self.all_wg is a list of RayWorkerGroup objects with specific methods for the ActorRolloutRefWorker bound to one instance
+        # and specific methods for the CriticWorker bound to another instance
+        # most importantly they both have an actor handle to the same ray actor
         if self.use_critic:
             self.critic_wg = all_wg["critic"]
+            #* when something like init_model() (or any method that was bound to a RayWorkerGroup) is called we
+            # 1. func_generator is called since this is what we bounded to the RayWorkerGroup (the method name init_model is passed in)
+            # 2. func_generator calls execute_all which eventually calls execute_remote_single_worker 
+            # go to execute_remote_single_worker function definition for more information!!!
             self.critic_wg.init_model()
 
         if self.use_reference_policy and not self.ref_in_actor:
@@ -761,6 +790,8 @@ class RayPPOTrainer:
         if self.use_rm:
             self.rm_wg = all_wg["rm"]
             self.rm_wg.init_model()
+
+        print(f"ALL_WG {all_wg}")
 
         # we should create rollout at the end so that vllm can have a better estimation of kv cache memory
         self.actor_rollout_wg = all_wg["actor_rollout"]
@@ -773,7 +804,7 @@ class RayPPOTrainer:
 
             self.async_rollout_mode = True
             self.async_rollout_manager = AsyncLLMServerManager(
-                config=self.config,
+                config=self.config.actor_rollout_ref,
                 worker_group=self.actor_rollout_wg,
             )
 
@@ -881,6 +912,9 @@ class RayPPOTrainer:
         to construct the PPO dataflow.
         The light-weight advantage computation is done on the driver process.
         """
+
+        print("FIT")
+        
         from omegaconf import OmegaConf
 
         from verl.utils.tracking import Tracking
@@ -998,8 +1032,8 @@ class RayPPOTrainer:
                         entropys = old_log_prob.batch["entropys"]
                         response_masks = batch.batch["response_mask"]
                         loss_agg_mode = self.config.actor_rollout_ref.actor.loss_agg_mode
-                        entropy_agg = agg_loss(loss_mat=entropys, loss_mask=response_masks, loss_agg_mode=loss_agg_mode)
-                        old_log_prob_metrics = {"actor/entropy": entropy_agg.detach().item()}
+                        entropy_loss = agg_loss(loss_mat=entropys, loss_mask=response_masks, loss_agg_mode=loss_agg_mode)
+                        old_log_prob_metrics = {"actor/entropy_loss": entropy_loss.detach().item()}
                         metrics.update(old_log_prob_metrics)
                         old_log_prob.batch.pop("entropys")
                         batch = batch.union(old_log_prob)
@@ -1072,7 +1106,7 @@ class RayPPOTrainer:
                             num_repeat=self.config.actor_rollout_ref.rollout.n,
                             norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
                             multi_turn=self.config.actor_rollout_ref.rollout.multi_turn.enable,
-                            config=self.config.algorithm,
+                            config=self.config.algorithm
                         )
 
                     # update critic
