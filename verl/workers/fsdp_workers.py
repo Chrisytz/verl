@@ -43,7 +43,7 @@ from verl.utils.activation_offload import enable_activation_offloading
 from verl.utils.checkpoint.fsdp_checkpoint_manager import FSDPCheckpointManager
 from verl.utils.debug import log_gpu_memory_usage
 from verl.utils.debug.performance import _timer, reduce_timing
-from verl.utils.device import get_device_name, get_torch_device, is_cuda_available, is_npu_available
+from verl.utils.device import get_device_name, get_torch_device, is_cuda_available, is_npu_available, check_tpu_via_env
 from verl.utils.flops_counter import FlopsCounter
 from verl.utils.fs import copy_to_local
 from verl.utils.fsdp_utils import (
@@ -101,67 +101,75 @@ class ActorRolloutRefWorker(Worker):
         self.config = config
         self.device_name = get_device_name()
 
-        # import torch.distributed
+        import torch.distributed
 
-        # if not torch.distributed.is_initialized():
-        #     rank = int(os.environ.get("RANK", 0))
-        #     world_size = int(os.environ.get("WORLD_SIZE", 1))
-        #     torch.distributed.init_process_group(backend="cpu:gloo,cuda:nccl" if is_cuda_available else "cpu:gloo,npu:hccl", rank=rank, world_size=world_size)
+        if not torch.distributed.is_initialized():
+            rank = int(os.environ.get("RANK", 0))
+            world_size = int(os.environ.get("WORLD_SIZE", 1))
+            if is_cuda_available:
+                backend = "cpu:gloo,cuda:nccl" 
+            elif check_tpu_via_env():
+                backend = "xla"
+            else:
+                backend = "cpu:gloo,npu:hccl"
+            
+            print(f"backend {backend}")
+            torch.distributed.init_process_group(backend=backend, rank=rank, world_size=world_size)
 
-        # # build device mesh for FSDP
-        # world_size = torch.distributed.get_world_size()
-        # # TODO(sgm): support FSDP hybrid shard for larger model
-        # self.device_mesh = create_device_mesh(world_size=world_size, fsdp_size=self.config.actor.fsdp_config.fsdp_size)
+        # build device mesh for FSDP
+        world_size = torch.distributed.get_world_size()
+        # TODO(sgm): support FSDP hybrid shard for larger model
+        self.device_mesh = create_device_mesh(world_size=world_size, fsdp_size=self.config.actor.fsdp_config.fsdp_size, device_name=self.device_name)
 
-        # # build device mesh for Ulysses Sequence Parallel
-        # self.ulysses_device_mesh = None
-        # self.ulysses_sequence_parallel_size = self.config.actor.get("ulysses_sequence_parallel_size", 1)
-        # dp = world_size // self.ulysses_sequence_parallel_size
-        # if self.ulysses_sequence_parallel_size > 1:
-        #     self.ulysses_device_mesh = init_device_mesh(self.device_name, mesh_shape=(dp, self.ulysses_sequence_parallel_size), mesh_dim_names=["dp", "sp"])
+        # build device mesh for Ulysses Sequence Parallel
+        self.ulysses_device_mesh = None
+        self.ulysses_sequence_parallel_size = self.config.actor.get("ulysses_sequence_parallel_size", 1)
+        dp = world_size // self.ulysses_sequence_parallel_size
+        if self.ulysses_sequence_parallel_size > 1:
+            self.ulysses_device_mesh = init_device_mesh(self.device_name, mesh_shape=(dp, self.ulysses_sequence_parallel_size), mesh_dim_names=["dp", "sp"])
 
-        # self.ulysses_sharding_manager = FSDPUlyssesShardingManager(self.ulysses_device_mesh)
-        # self._lora_rank = self.config.model.get("lora_rank", 0)
-        # self._is_lora = self._lora_rank > 0
+        self.ulysses_sharding_manager = FSDPUlyssesShardingManager(self.ulysses_device_mesh)
+        self._lora_rank = self.config.model.get("lora_rank", 0)
+        self._is_lora = self._lora_rank > 0
 
-        # self.role = role
-        # assert self.role in ["actor", "rollout", "ref", "actor_rollout", "actor_rollout_ref"]
+        self.role = role
+        assert self.role in ["actor", "rollout", "ref", "actor_rollout", "actor_rollout_ref"]
 
-        # self._is_actor = self.role in ["actor", "actor_rollout", "actor_rollout_ref"]
-        # self._is_rollout = self.role in ["rollout", "actor_rollout", "actor_rollout_ref"]
-        # self._is_ref = self.role in ["ref", "actor_rollout_ref"]
+        self._is_actor = self.role in ["actor", "actor_rollout", "actor_rollout_ref"]
+        self._is_rollout = self.role in ["rollout", "actor_rollout", "actor_rollout_ref"]
+        self._is_ref = self.role in ["ref", "actor_rollout_ref"]
 
-        # self._is_offload_param = False
-        # self._is_offload_optimizer = False
-        # if self._is_actor:
-        #     self._is_offload_param = self.config.actor.fsdp_config.get("param_offload", False)
-        #     self._is_offload_optimizer = self.config.actor.fsdp_config.get("optimizer_offload", False)
-        # elif self._is_ref:
-        #     # TODO: it seems that manual offload is slowly than FSDP offload
-        #     self._is_offload_param = self.config.ref.fsdp_config.get("param_offload", False)
+        self._is_offload_param = False
+        self._is_offload_optimizer = False
+        if self._is_actor:
+            self._is_offload_param = self.config.actor.fsdp_config.get("param_offload", False)
+            self._is_offload_optimizer = self.config.actor.fsdp_config.get("optimizer_offload", False)
+        elif self._is_ref:
+            # TODO: it seems that manual offload is slowly than FSDP offload
+            self._is_offload_param = self.config.ref.fsdp_config.get("param_offload", False)
 
-        # # normalize config
-        # if self._is_actor:
-        #     self.config.actor.ppo_mini_batch_size *= self.config.rollout.n
-        #     self.config.actor.ppo_mini_batch_size //= self.device_mesh.size() // self.ulysses_sequence_parallel_size
-        #     assert self.config.actor.ppo_mini_batch_size > 0, f"ppo_mini_batch_size {self.config.actor.ppo_mini_batch_size} should be larger than 0 after normalization"
-        #     # micro bsz
-        #     if self.config.actor.ppo_micro_batch_size is not None:
-        #         self.config.actor.ppo_micro_batch_size //= self.device_mesh.size() // self.ulysses_sequence_parallel_size
-        #         self.config.actor.ppo_micro_batch_size_per_gpu = self.config.actor.ppo_micro_batch_size
+        # normalize config
+        if self._is_actor:
+            self.config.actor.ppo_mini_batch_size *= self.config.rollout.n
+            self.config.actor.ppo_mini_batch_size //= self.device_mesh.size() // self.ulysses_sequence_parallel_size
+            assert self.config.actor.ppo_mini_batch_size > 0, f"ppo_mini_batch_size {self.config.actor.ppo_mini_batch_size} should be larger than 0 after normalization"
+            # micro bsz
+            if self.config.actor.ppo_micro_batch_size is not None:
+                self.config.actor.ppo_micro_batch_size //= self.device_mesh.size() // self.ulysses_sequence_parallel_size
+                self.config.actor.ppo_micro_batch_size_per_gpu = self.config.actor.ppo_micro_batch_size
 
-        #     if self.config.actor.ppo_micro_batch_size_per_gpu is not None:
-        #         assert self.config.actor.ppo_mini_batch_size % self.config.actor.ppo_micro_batch_size_per_gpu == 0, f"normalized ppo_mini_batch_size {self.config.actor.ppo_mini_batch_size} should be divisible by ppo_micro_batch_size_per_gpu {self.config.actor.ppo_micro_batch_size_per_gpu}"
-        #         assert self.config.actor.ppo_mini_batch_size // self.config.actor.ppo_micro_batch_size_per_gpu > 0, f"normalized ppo_mini_batch_size {self.config.actor.ppo_mini_batch_size} should be larger than ppo_micro_batch_size_per_gpu {self.config.actor.ppo_micro_batch_size_per_gpu}"
+            if self.config.actor.ppo_micro_batch_size_per_gpu is not None:
+                assert self.config.actor.ppo_mini_batch_size % self.config.actor.ppo_micro_batch_size_per_gpu == 0, f"normalized ppo_mini_batch_size {self.config.actor.ppo_mini_batch_size} should be divisible by ppo_micro_batch_size_per_gpu {self.config.actor.ppo_micro_batch_size_per_gpu}"
+                assert self.config.actor.ppo_mini_batch_size // self.config.actor.ppo_micro_batch_size_per_gpu > 0, f"normalized ppo_mini_batch_size {self.config.actor.ppo_mini_batch_size} should be larger than ppo_micro_batch_size_per_gpu {self.config.actor.ppo_micro_batch_size_per_gpu}"
 
-        # # normalize rollout config
-        # if self._is_rollout and self.config.rollout.log_prob_micro_batch_size is not None:
-        #     self.config.rollout.log_prob_micro_batch_size //= self.device_mesh.size() // self.ulysses_sequence_parallel_size
-        #     self.config.rollout.log_prob_micro_batch_size_per_gpu = self.config.rollout.log_prob_micro_batch_size
-        # # normalize ref config
-        # if self._is_ref and self.config.ref.log_prob_micro_batch_size is not None:
-        #     self.config.ref.log_prob_micro_batch_size //= self.device_mesh.size() // self.ulysses_sequence_parallel_size
-        #     self.config.ref.log_prob_micro_batch_size_per_gpu = self.config.ref.log_prob_micro_batch_size
+        # normalize rollout config
+        if self._is_rollout and self.config.rollout.log_prob_micro_batch_size is not None:
+            self.config.rollout.log_prob_micro_batch_size //= self.device_mesh.size() // self.ulysses_sequence_parallel_size
+            self.config.rollout.log_prob_micro_batch_size_per_gpu = self.config.rollout.log_prob_micro_batch_size
+        # normalize ref config
+        if self._is_ref and self.config.ref.log_prob_micro_batch_size is not None:
+            self.config.ref.log_prob_micro_batch_size //= self.device_mesh.size() // self.ulysses_sequence_parallel_size
+            self.config.ref.log_prob_micro_batch_size_per_gpu = self.config.ref.log_prob_micro_batch_size
 
     def _build_model_optimizer(
         self,

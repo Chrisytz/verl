@@ -50,7 +50,8 @@ def run_ppo(config) -> None:
         )
     
     # check for TPU availability and set environment variable
-    tpu_available = ray.get(is_torch_tpu_available.remote())
+    tpu_available = True 
+    # tpu_available = ray.get(is_torch_tpu_available.remote())
     task_runner_env_vars = {
         "TORCH_TPU_AVAILABLE": "1" if tpu_available else "0"
     }
@@ -191,7 +192,7 @@ class TaskRunner:
         # Initialize the workers of the trainer.
         trainer.init_workers()
         # Start the training process.
-        # trainer.fit()
+        trainer.fit()
 
 
 def create_rl_dataset(data_paths, data_config, tokenizer, processor):

@@ -12,6 +12,7 @@ import logging
 
 import torch
 import os
+from .tpu_utils import Tpu
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +37,7 @@ def check_tpu_via_env() -> bool:
     if _is_tpu_available_cached is not None:
         return _is_tpu_available_cached
 
-    tpu_env_var = os.environ.get("VERL_TORCH_TPU_AVAILABLE")
+    tpu_env_var = os.environ.get("TORCH_TPU_AVAILABLE")
     if tpu_env_var == "1":
         _is_tpu_available_cached = True
     else:
@@ -57,7 +58,7 @@ def get_device_name() -> str:
     elif is_npu_available:
         device = "npu"
     elif is_tpu_available:
-        device = "tpu"
+        device = "xla"
     else:
         device = "cpu"
     return device
@@ -69,6 +70,8 @@ def get_torch_device() -> any:
         module: The corresponding torch device namespace, or torch.cuda if not found.
     """
     device_name = get_device_name()
+    if device_name == "xla":
+        return Tpu(device_name)
     try:
         return getattr(torch, device_name)
     except AttributeError:
