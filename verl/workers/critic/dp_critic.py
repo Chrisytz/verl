@@ -21,8 +21,8 @@ import os
 
 import torch
 import torch.distributed
-from flash_attn.bert_padding import (index_first_axis, pad_input, rearrange,
-                                     unpad_input)
+# from flash_attn.bert_padding import (index_first_axis, pad_input, rearrange,
+                                    #  unpad_input)
 from torch import nn, optim
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 
@@ -46,6 +46,9 @@ if is_cuda_available:
 elif is_npu_available:
     from transformers.integrations.npu_flash_attention import (
         index_first_axis, pad_input, rearrange, unpad_input)
+    
+from torch_xla.amp import syncfree
+import torch_xla.core.xla_model as xm
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -78,6 +81,7 @@ class DataParallelPPOCritic(BasePPOCritic):
                 position_ids = position_ids.transpose(0, 1)
 
             if self.use_remove_padding:
+                print("use remove padding")
                 input_ids_rmpad, indices, *_ = unpad_input(input_ids.unsqueeze(-1), attention_mask)  # input_ids_rmpad (total_nnz, ...)
                 input_ids_rmpad = input_ids_rmpad.transpose(0, 1)  # (1, total_nnz)
 
@@ -122,12 +126,20 @@ class DataParallelPPOCritic(BasePPOCritic):
                     **multi_modal_inputs,
                     use_cache=False,
                 )  # prevent model thinks we are generating
+
+                print(f"critic_module outputs type: {type(output)}")
+                print(f"critic_module outputs require_grad: {getattr(output, 'requires_grad', 'N/A')}") # Check if output itself requires grad
                 if hasattr(self.critic_module, "v_head"):
                     # For trl.AutoModelForCausalLMWithValueHead
                     values = output[2]
+                    print(f"values (v_head branch) requires_grad: {values.requires_grad}")
+
                 else:
                     values = output.logits
+                    print(f"values (v_head branch) requires_grad: {values.requires_grad}")
+
                 values = values[:, -response_length - 1 : -1].squeeze(-1)
+                print(f"values.requires_grad: {values.requires_grad}")
             return values
 
     def _optimizer_step(self):
@@ -145,7 +157,10 @@ class DataParallelPPOCritic(BasePPOCritic):
             print(f"WARN: grad_norm is not finite: {grad_norm}")
             self.critic_optimizer.zero_grad()
         else:
-            self.critic_optimizer.step()
+            if self.device_name == "xla":
+                xm.optimizer_step(self.critic_optimizer)
+            else:
+                self.critic_optimizer.step()
         return grad_norm
 
     @GPUMemoryLogger(role="dp critic", logger=logger)
@@ -194,6 +209,7 @@ class DataParallelPPOCritic(BasePPOCritic):
     @GPUMemoryLogger(role="dp critic", logger=logger)
     def update_critic(self, data: DataProto):
         # make sure we are in training mode
+        breakpoint()
         self.critic_module.train()
         metrics = {}
 
@@ -228,11 +244,13 @@ class DataParallelPPOCritic(BasePPOCritic):
                 self.critic_optimizer.zero_grad()
 
                 for data in micro_batches:
+                    print("data in micro_batches")
                     # Support all devices
                     if isinstance(data, DataProto):
                         data = {**data.batch.to(get_torch_device().current_device()), **data.non_tensor_batch}
                     else:
                         data = data.to(get_torch_device().current_device())  # critic device is cpu when using offload
+                    data.require_grad = True
                     responses = data["responses"]
                     attention_mask = data["attention_mask"]
                     values = data["values"]
@@ -258,6 +276,9 @@ class DataParallelPPOCritic(BasePPOCritic):
                         loss = vf_loss * (len(data) / self.config.ppo_mini_batch_size)
                     else:
                         loss = vf_loss / self.gradient_accumulation
+                    
+                    print(f"vpreds.requires_grad: {vpreds.requires_grad}")
+                    print(f"vf_loss.requires_grad: {vf_loss.requires_grad}")
 
                     loss.backward()
 

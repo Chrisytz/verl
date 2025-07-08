@@ -509,11 +509,13 @@ def load_valuehead_model(local_path, torch_dtype, model_config, trust_remote_cod
             pretrained_model_name_or_path=local_path,
             torch_dtype=torch_dtype,
             config=model_config,
-            attn_implementation="flash_attention_2",
+            # attn_implementation="flash_attention_2",
             trust_remote_code=trust_remote_code,
         )
+        print(f"model requires grad {model.requires_grad}")
         return model
     except BaseException as e:
+        print("FAILED TO LOAD AUTOMODELFORTOKENCLASSIFICATION")
         if not is_trl_available():
             raise RuntimeError(f"model({local_path}) is not a value head model, please install trl to make it valid") from e
 
@@ -529,9 +531,11 @@ def load_valuehead_model(local_path, torch_dtype, model_config, trust_remote_cod
         pretrained_model_name_or_path=local_path,
         torch_dtype=torch_dtype,
         config=model_config,
-        attn_implementation="flash_attention_2",
+        # attn_implementation="flash_attention_2",
         trust_remote_code=trust_remote_code,
     )
     model = AutoModelForCausalLMWithValueHead.from_pretrained(ori_model)
+
     patch_valuehead_model(model)
+    
     return model
