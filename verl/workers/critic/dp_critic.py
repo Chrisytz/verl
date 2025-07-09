@@ -66,6 +66,8 @@ class DataParallelPPOCritic(BasePPOCritic):
         self.device_name = get_device_name()
 
     def _forward_micro_batch(self, micro_batch):
+        for name, param in self.critic_module.named_parameters():
+            print(f"Param: {name}, requires_grad: {param.requires_grad}")
         response_length = micro_batch["responses"].size(-1)
         multi_modal_inputs = {}
         if "multi_modal_inputs" in micro_batch.keys():
@@ -132,10 +134,12 @@ class DataParallelPPOCritic(BasePPOCritic):
                 if hasattr(self.critic_module, "v_head"):
                     # For trl.AutoModelForCausalLMWithValueHead
                     values = output[2]
+                    values.requires_grad = True
                     print(f"values (v_head branch) requires_grad: {values.requires_grad}")
 
                 else:
                     values = output.logits
+                    values.requires_grad_(True)
                     print(f"values (v_head branch) requires_grad: {values.requires_grad}")
 
                 values = values[:, -response_length - 1 : -1].squeeze(-1)
@@ -250,7 +254,6 @@ class DataParallelPPOCritic(BasePPOCritic):
                         data = {**data.batch.to(get_torch_device().current_device()), **data.non_tensor_batch}
                     else:
                         data = data.to(get_torch_device().current_device())  # critic device is cpu when using offload
-                    data.require_grad = True
                     responses = data["responses"]
                     attention_mask = data["attention_mask"]
                     values = data["values"]
@@ -271,6 +274,7 @@ class DataParallelPPOCritic(BasePPOCritic):
                         cliprange_value=self.config.cliprange_value,
                         loss_agg_mode=self.config.loss_agg_mode,
                     )
+                    vf_loss.requires_grad = True
                     if self.config.use_dynamic_bsz:
                         # relative to the dynamic bsz
                         loss = vf_loss * (len(data) / self.config.ppo_mini_batch_size)

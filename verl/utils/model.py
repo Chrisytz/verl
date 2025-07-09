@@ -512,7 +512,7 @@ def load_valuehead_model(local_path, torch_dtype, model_config, trust_remote_cod
             # attn_implementation="flash_attention_2",
             trust_remote_code=trust_remote_code,
         )
-        print(f"model requires grad {model.requires_grad}")
+        # print(f"model requires grad {model.requires_grad}")
         return model
     except BaseException as e:
         print("FAILED TO LOAD AUTOMODELFORTOKENCLASSIFICATION")
@@ -539,3 +539,5 @@ def load_valuehead_model(local_path, torch_dtype, model_config, trust_remote_cod
     patch_valuehead_model(model)
     
     return model
+
+# PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo  data.train_files=$HOME/data/gsm8k/train.parquet  data.val_files=$HOME/data/gsm8k/test.parquet  data.train_batch_size=16  data.max_prompt_length=8  data.max_response_length=4  actor_rollout_ref.model.path=Qwen/Qwen2.5-0.5B-Instruct  actor_rollout_ref.actor.optim.lr=1e-6  actor_rollout_ref.actor.ppo_mini_batch_size=16  actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=4  actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=8  actor_rollout_ref.rollout.tensor_model_parallel_size=1  actor_rollout_ref.rollout.gpu_memory_utilization=0.4  actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=4  critic.optim.lr=1e-5  critic.model.path=Qwen/Qwen2.5-0.5B-Instruct  critic.ppo_micro_batch_size_per_gpu=4  algorithm.kl_ctrl.kl_coef=0.001  trainer.logger=['console']  trainer.val_before_train=False  trainer.default_hdfs_dir=null  trainer.n_gpus_per_node=1  trainer.nnodes=1  trainer.save_freq=10  trainer.test_freq=10  trainer.total_epochs=1 trainer.n_tpus_per_node=1 actor_rollout_ref.rollout.enable_sleep_mode=False actor_rollout_ref.rollout.enforce_eager=False actor_rollout_ref.rollout.free_cache_engine=False actor_rollout_ref.rollout.disable_mm_preprocessor_cache=False  2>&1 | tee verl_demo.log

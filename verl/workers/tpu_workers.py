@@ -796,8 +796,8 @@ class CriticWorker(Worker):
         #     enable_gradient_checkpointing = config.model.get("enable_gradient_checkpointing", False)
         #     enable_activation_offloading(critic_module, config.strategy, enable_gradient_checkpointing)
 
-
-        critic_optimizer = syncfree.AdamW(
+        critic_module.to(self.device_name)
+        critic_optimizer = torch.optim.AdamW(
             critic_module.parameters(),
             lr=config.optim.lr,
             betas=config.optim.get("betas", (0.9, 0.999)),
