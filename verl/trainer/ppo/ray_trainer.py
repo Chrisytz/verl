@@ -61,6 +61,30 @@ from verl.utils.tracking import ValidationGenerationsLogger
 
 WorkerType = Type[Worker]
 
+def dump_tensor_dict_to_json_file(tensor_dict: dict, output_filepath: str):
+    """
+    Dumps a dictionary (or TensorDict) containing PyTorch tensors
+    to a single JSON file. Tensors are converted to Python lists.
+
+    Args:
+        tensor_dict (dict): The dictionary containing tensors (e.g., gen_batch_output.batch).
+        output_filepath (str): The path to the output JSON file.
+    """
+    serializable_data = {}
+    for key, value in tensor_dict.items():
+        if isinstance(value, torch.Tensor):
+            # Convert tensor to CPU and then to a Python list
+            serializable_data[key] = value.cpu().tolist()
+        else:
+            # Handle other non-tensor types if they exist in the dict
+            serializable_data[key] = value
+
+    os.makedirs(os.path.dirname(output_filepath) or '.', exist_ok=True)
+    with open(output_filepath, 'w', encoding='utf-8') as f:
+        json.dump(serializable_data, f, indent=4, ensure_ascii=False)
+    print(f"Successfully dumped batch data to: {output_filepath}")
+
+
 
 class Role(Enum):
     """
@@ -922,7 +946,8 @@ class RayPPOTrainer:
         last_val_metrics = None
 
         for epoch in range(self.config.trainer.total_epochs):
-            for batch_dict in self.train_dataloader:
+            for i, batch_dict in enumerate(self.train_dataloader):
+                print("ONE ITERATION OF TRAINING", i)
                 metrics = {}
                 timing_raw = {}
                 batch: DataProto = DataProto.from_single_dict(batch_dict)
@@ -945,36 +970,45 @@ class RayPPOTrainer:
 
                 with _timer("step", timing_raw):
                     # generate a batch
-                    with _timer("gen", timing_raw):
-                        if not self.async_rollout_mode:
-                            gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
-                        else:
-                            self.async_rollout_manager.wake_up()
-                            gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch)
-                            self.async_rollout_manager.sleep()
-                        timing_raw.update(gen_batch_output.meta_info["timing"])
-                        gen_batch_output.meta_info.pop("timing", None)
+                    # with _timer("gen", timing_raw):
+                    #     if not self.async_rollout_mode:
+                    #         gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
+                    #     else:
+                    #         self.async_rollout_manager.wake_up()
+                    #         gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch)
+                    #         self.async_rollout_manager.sleep()
+                    #     timing_raw.update(gen_batch_output.meta_info["timing"])
+                    #     gen_batch_output.meta_info.pop("timing", None)
 
-                    if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
-                        with _timer("gen_max", timing_raw):
-                            gen_baseline_batch = deepcopy(gen_batch)
-                            gen_baseline_batch.meta_info["do_sample"] = False
-                            gen_baseline_output = self.actor_rollout_wg.generate_sequences(gen_baseline_batch)
+                    # if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
+                    #     with _timer("gen_max", timing_raw):
+                    #         gen_baseline_batch = deepcopy(gen_batch)
+                    #         gen_baseline_batch.meta_info["do_sample"] = False
+                    #         gen_baseline_output = self.actor_rollout_wg.generate_sequences(gen_baseline_batch)
 
-                            batch = batch.union(gen_baseline_output)
-                            reward_baseline_tensor = self.reward_fn(batch)
-                            reward_baseline_tensor = reward_baseline_tensor.sum(dim=-1)
+                    #         batch = batch.union(gen_baseline_output)
+                    #         reward_baseline_tensor = self.reward_fn(batch)
+                    #         reward_baseline_tensor = reward_baseline_tensor.sum(dim=-1)
 
-                            batch.pop(batch_keys=list(gen_baseline_output.batch.keys()))
+                    #         batch.pop(batch_keys=list(gen_baseline_output.batch.keys()))
 
-                            batch.batch["reward_baselines"] = reward_baseline_tensor
+                    #         batch.batch["reward_baselines"] = reward_baseline_tensor
 
-                            del gen_baseline_batch, gen_baseline_output
+                    #         del gen_baseline_batch, gen_baseline_output
 
                     batch.non_tensor_batch["uid"] = np.array([str(uuid.uuid4()) for _ in range(len(batch.batch))], dtype=object)
                     # repeat to align with repeated responses in rollout
                     batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
-                    batch = batch.union(gen_batch_output)
+                    # batch = batch.union(gen_batch_output)
+                    breakpoint()
+                    with open("/workspaces/batch.json", 'r', encoding='utf-8') as f:
+                        loaded_data = json.load(f)
+                        batch.batch["responses"] = torch.tensor(loaded_data["responses"], dtype=torch.int64)
+                        batch.batch["input_ids"] = torch.tensor(loaded_data["input_ids"], dtype=torch.int64)
+                        batch.batch["attention_mask"] = torch.tensor(loaded_data["attention_mask"], dtype=torch.int64)
+                        batch.batch["position_ids"] = torch.tensor(loaded_data["position_ids"], dtype=torch.int64)
+                        batch.batch["prompts"] = torch.tensor(loaded_data["prompts"], dtype=torch.int64)
+                        batch.batch["rollout_log_probs"] = torch.tensor(loaded_data["rollout_log_probs"], dtype=torch.float32)
 
                     batch.batch["response_mask"] = compute_response_mask(batch)
                     # Balance the number of valid tokens across DP ranks.
@@ -987,6 +1021,8 @@ class RayPPOTrainer:
 
                     # compute global_valid tokens
                     batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
+
+
 
                     with _timer("reward", timing_raw):
                         # compute reward model score
@@ -1086,6 +1122,7 @@ class RayPPOTrainer:
                     if self.use_critic:
                         with _timer("update_critic", timing_raw):
                             critic_output = self.critic_wg.update_critic(batch)
+                            print("updated critic")
                         critic_output_metrics = reduce_metrics(critic_output.meta_info["metrics"])
                         metrics.update(critic_output_metrics)
 
@@ -1095,6 +1132,7 @@ class RayPPOTrainer:
                         with _timer("update_actor", timing_raw):
                             batch.meta_info["multi_turn"] = self.config.actor_rollout_ref.rollout.multi_turn.enable
                             actor_output = self.actor_rollout_wg.update_actor(batch)
+                            print("updated actor")
                         actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
                         metrics.update(actor_output_metrics)
 

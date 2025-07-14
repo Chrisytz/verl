@@ -14,10 +14,12 @@
 """
 Note that we don't combine the main with ray_trainer as ray_trainer is used by other main.
 """
+import os
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = '3'
+
 
 import hydra
 import ray
-
 from verl.trainer.ppo.ray_trainer import RayPPOTrainer
 from verl.trainer.ppo.reward import load_reward_manager
 
@@ -256,4 +258,5 @@ def create_rl_sampler(data_config, dataset):
 
 
 if __name__ == "__main__":
+
     main()

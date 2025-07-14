@@ -67,7 +67,7 @@ from verl.workers.sharding_manager.fsdp_ulysses import FSDPUlyssesShardingManage
 from torch_xla.amp import syncfree
 
 logger = logging.getLogger(__file__)
-logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "ERROR"))
 
 
 def create_device_mesh(world_size, fsdp_size, device_name):
@@ -237,8 +237,8 @@ class ActorRolloutRefWorker(Worker):
         # some parameters may not in torch_dtype. TODO(zhangchi.usc1992) remove this after we switch to fsdp2
         actor_module.to(torch_dtype)
 
-        if enable_gradient_checkpointing:
-            actor_module.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+        # if enable_gradient_checkpointing:
+            # actor_module.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
         if self._is_lora:
             print("Applying LoRA to actor module")
             actor_module.enable_input_require_grads()
@@ -256,8 +256,8 @@ class ActorRolloutRefWorker(Worker):
         fsdp_strategy = self.config.actor.strategy
         actor_module_fsdp = actor_module
 
-        if enable_activation_offload:
-            enable_activation_offloading(actor_module_fsdp, fsdp_strategy, enable_gradient_checkpointing)
+        # if enable_activation_offload:
+        #     enable_activation_offloading(actor_module_fsdp, fsdp_strategy, enable_gradient_checkpointing)
 
 
         # TODO: add more optimizer args into config
@@ -385,8 +385,8 @@ class ActorRolloutRefWorker(Worker):
                 self.config.actor.use_fused_kernels = use_fused_kernels
             self.actor = DataParallelPPOActor(config=self.config.actor, actor_module=self.actor_module_fsdp, actor_optimizer=self.actor_optimizer)
 
-        if self._is_rollout:
-            self.rollout, self.rollout_sharding_manager = self._build_rollout(trust_remote_code=self.config.model.get("trust_remote_code", False))
+        # if self._is_rollout:
+        #     self.rollout, self.rollout_sharding_manager = self._build_rollout(trust_remote_code=self.config.model.get("trust_remote_code", False))
 
         if self._is_ref:
             local_path = copy_to_local(self.config.model.path, use_shm=use_shm)

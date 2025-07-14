@@ -43,11 +43,12 @@ if is_cuda_available:
 elif is_npu_available:
     from transformers.integrations.npu_flash_attention import index_first_axis, pad_input, rearrange, unpad_input
 
+import torch_xla.core.xla_model as xm
 
 __all__ = ["DataParallelPPOActor"]
 
 logger = logging.getLogger(__file__)
-logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "ERROR"))
 
 
 class DataParallelPPOActor(BasePPOActor):
@@ -171,11 +172,11 @@ class DataParallelPPOActor(BasePPOActor):
                     )
 
                     # compute entropy
-                    if calculate_entropy:
-                        if not self.config.entropy_checkpointing:
-                            entropy_rmpad = self.compute_entropy_from_logits(logits_rmpad)  # ((total_nnz / sp) + pad)
-                        else:
-                            entropy_rmpad = torch.utils.checkpoint.checkpoint(self.compute_entropy_from_logits, logits_rmpad)
+                    # if calculate_entropy:
+                    #     if not self.config.entropy_checkpointing:
+                    #         entropy_rmpad = self.compute_entropy_from_logits(logits_rmpad)  # ((total_nnz / sp) + pad)
+                    #     else:
+                    #         entropy_rmpad = torch.utils.checkpoint.checkpoint(self.compute_entropy_from_logits, logits_rmpad)
 
                 # gather log_prob if sp > 1
                 if self.use_ulysses_sp:
@@ -217,6 +218,7 @@ class DataParallelPPOActor(BasePPOActor):
                 extra_args = {}
                 if self.use_fused_kernels:
                     extra_args["temperature"] = temperature
+                # with torch.enable_grad():
                 output = self.actor_module(
                     input_ids=input_ids,
                     attention_mask=attention_mask,
@@ -256,10 +258,13 @@ class DataParallelPPOActor(BasePPOActor):
             print(f"WARN: rank {torch.distributed.get_rank()} grad_norm is not finite: {grad_norm}")
             self.actor_optimizer.zero_grad()
         else:
-            self.actor_optimizer.step()
+            if self.device_name == "xla":
+                xm.optimizer_step(self.actor_optimizer)
+            else:
+                self.actor_optimizer.step()
         return grad_norm
 
-    @GPUMemoryLogger(role="dp actor", logger=logger)
+    # @GPUMemoryLogger(role="dp actor", logger=logger)
     def compute_log_prob(self, data: DataProto, calculate_entropy=False) -> torch.Tensor:
         """Compute the log probability of the responses given input_ids, attention_mask and position_ids
 
@@ -325,8 +330,9 @@ class DataParallelPPOActor(BasePPOActor):
 
         return log_probs, entropys
 
-    @GPUMemoryLogger(role="dp actor", logger=logger)
+    # @GPUMemoryLogger(role="dp actor", logger=logger)
     def update_policy(self, data: DataProto):
+        breakpoint()
         # make sure we are in training mode
         self.actor_module.train()
 
@@ -351,6 +357,7 @@ class DataParallelPPOActor(BasePPOActor):
             dataloader = batch.split(self.config.ppo_mini_batch_size)
 
         metrics = {}
+        print("UPDATE ACTOR DATALOADER LENGTH", len(dataloader))
         for epoch in range(self.config.ppo_epochs):
             for batch_idx, data in enumerate(dataloader):
                 # split batch into micro_batches
@@ -369,6 +376,7 @@ class DataParallelPPOActor(BasePPOActor):
 
                 self.actor_optimizer.zero_grad()
 
+                print("UPDATE ACTOR MICRO_BATCHES LENGTH", len(micro_batches))
                 for data in micro_batches:
                     # Support all hardwares
                     if isinstance(data, DataProto):

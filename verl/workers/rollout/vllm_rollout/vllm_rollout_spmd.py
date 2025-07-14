@@ -145,7 +145,6 @@ class vLLMRollout(BaseRollout):
         engine_kwargs = {key: val for key, val in engine_kwargs.items() if val is not None}
         if config.get("limit_images", None):  # support for multi-image data
             engine_kwargs["limit_mm_per_prompt"] = {"image": config.get("limit_images")}
-
         self.inference_engine = LLM(
             model=model_path,
             enable_sleep_mode=config.enable_sleep_mode,
@@ -156,7 +155,7 @@ class vLLMRollout(BaseRollout):
             gpu_memory_utilization=config.gpu_memory_utilization,
             disable_custom_all_reduce=True,
             disable_mm_preprocessor_cache=config.disable_mm_preprocessor_cache,
-            skip_tokenizer_init=False,
+            skip_tokenizer_init=True,
             max_model_len=max_model_len,
             load_format=load_format,
             disable_log_stats=config.disable_log_stats,
@@ -208,7 +207,7 @@ class vLLMRollout(BaseRollout):
         for key, value in old_sampling_params_args.items():
             setattr(self.sampling_params, key, value)
 
-    @GPUMemoryLogger(role="vllm rollout spmd", logger=logger)
+    # @GPUMemoryLogger(role="vllm rollout spmd", logger=logger)
     @torch.no_grad()
     def generate_sequences(self, prompts: DataProto, **kwargs) -> DataProto:
         # rebuild vllm cache engine

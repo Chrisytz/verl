@@ -47,11 +47,10 @@ elif is_npu_available:
     from transformers.integrations.npu_flash_attention import (
         index_first_axis, pad_input, rearrange, unpad_input)
     
-from torch_xla.amp import syncfree
 import torch_xla.core.xla_model as xm
 
 logger = logging.getLogger(__file__)
-logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "ERROR"))
 
 
 class DataParallelPPOCritic(BasePPOCritic):
@@ -65,9 +64,7 @@ class DataParallelPPOCritic(BasePPOCritic):
         self.ulysses_sequence_parallel_size = self.config.get("ulysses_sequence_parallel_size", 1)
         self.device_name = get_device_name()
 
-    def _forward_micro_batch(self, micro_batch):
-        for name, param in self.critic_module.named_parameters():
-            print(f"Param: {name}, requires_grad: {param.requires_grad}")
+    def _forward_micro_batch(self, micro_batch, enable_grad):
         response_length = micro_batch["responses"].size(-1)
         multi_modal_inputs = {}
         if "multi_modal_inputs" in micro_batch.keys():
@@ -121,29 +118,27 @@ class DataParallelPPOCritic(BasePPOCritic):
                 values = pad_input(values_rmpad, indices=indices, batch=batch, seqlen=seqlen).squeeze(-1)
                 values = values[:, -response_length - 1 : -1]
             else:
-                output = self.critic_module(
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
-                    position_ids=position_ids,
-                    **multi_modal_inputs,
-                    use_cache=False,
-                )  # prevent model thinks we are generating
+                grad_context = torch.enable_grad() if enable_grad else torch.no_grad()
+                with grad_context:
+                    output = self.critic_module(
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
+                        position_ids=position_ids,
+                        **multi_modal_inputs,
+                        use_cache=False,
+                    )
+                
 
-                print(f"critic_module outputs type: {type(output)}")
-                print(f"critic_module outputs require_grad: {getattr(output, 'requires_grad', 'N/A')}") # Check if output itself requires grad
                 if hasattr(self.critic_module, "v_head"):
                     # For trl.AutoModelForCausalLMWithValueHead
                     values = output[2]
                     values.requires_grad = True
-                    print(f"values (v_head branch) requires_grad: {values.requires_grad}")
 
                 else:
                     values = output.logits
                     values.requires_grad_(True)
-                    print(f"values (v_head branch) requires_grad: {values.requires_grad}")
 
                 values = values[:, -response_length - 1 : -1].squeeze(-1)
-                print(f"values.requires_grad: {values.requires_grad}")
             return values
 
     def _optimizer_step(self):
@@ -167,7 +162,7 @@ class DataParallelPPOCritic(BasePPOCritic):
                 self.critic_optimizer.step()
         return grad_norm
 
-    @GPUMemoryLogger(role="dp critic", logger=logger)
+    # @GPUMemoryLogger(role="dp critic", logger=logger)
     def compute_values(self, data: DataProto) -> torch.Tensor:
         self.critic_module.eval()
         micro_batch_size = data.meta_info["micro_batch_size"]
@@ -193,7 +188,7 @@ class DataParallelPPOCritic(BasePPOCritic):
                 micro_batch = {**micro_batch.batch, **micro_batch.non_tensor_batch}
 
             with torch.no_grad():
-                values = self._forward_micro_batch(micro_batch)
+                values = self._forward_micro_batch(micro_batch, False)
             values_lst.append(values)
         values = torch.concat(values_lst, dim=0)
 
@@ -210,10 +205,9 @@ class DataParallelPPOCritic(BasePPOCritic):
         values = values * response_mask # Only action tokens have values
         return values
 
-    @GPUMemoryLogger(role="dp critic", logger=logger)
+    # @GPUMemoryLogger(role="dp critic", logger=logger)
     def update_critic(self, data: DataProto):
         # make sure we are in training mode
-        breakpoint()
         self.critic_module.train()
         metrics = {}
 
@@ -229,7 +223,8 @@ class DataParallelPPOCritic(BasePPOCritic):
             dataloader = data.select(select_keys, non_tensor_select_keys).chunk(num_mini_batches)
         else:
             dataloader = batch.split(self.config.ppo_mini_batch_size)
-
+        
+        print("UPDATE CRITIC DATALOADER LENGTH", len(dataloader))
         for epoch in range(self.config.ppo_epochs):
             for batch_idx, data in enumerate(dataloader):
                 # split batch into micro_batches
@@ -246,9 +241,9 @@ class DataParallelPPOCritic(BasePPOCritic):
                     self.gradient_accumulation = self.config.ppo_mini_batch_size // self.config.ppo_micro_batch_size_per_gpu
 
                 self.critic_optimizer.zero_grad()
-
-                for data in micro_batches:
-                    print("data in micro_batches")
+                print("UPDATE CRITIC MICRO_BATCHES LENGTH", len(micro_batches))
+                for data_idx, data in enumerate(micro_batches):
+                    print("data in micro_batches", batch_idx, data_idx)
                     # Support all devices
                     if isinstance(data, DataProto):
                         data = {**data.batch.to(get_torch_device().current_device()), **data.non_tensor_batch}
@@ -262,7 +257,7 @@ class DataParallelPPOCritic(BasePPOCritic):
 
                     response_mask = attention_mask[:, -response_length:]
 
-                    vpreds = self._forward_micro_batch(data)
+                    vpreds = self._forward_micro_batch(data, True)
 
                     # assert not torch.any(torch.isnan(vpreds)).item()
 
@@ -274,16 +269,12 @@ class DataParallelPPOCritic(BasePPOCritic):
                         cliprange_value=self.config.cliprange_value,
                         loss_agg_mode=self.config.loss_agg_mode,
                     )
-                    vf_loss.requires_grad = True
                     if self.config.use_dynamic_bsz:
                         # relative to the dynamic bsz
                         loss = vf_loss * (len(data) / self.config.ppo_mini_batch_size)
                     else:
                         loss = vf_loss / self.gradient_accumulation
                     
-                    print(f"vpreds.requires_grad: {vpreds.requires_grad}")
-                    print(f"vf_loss.requires_grad: {vf_loss.requires_grad}")
-
                     loss.backward()
 
                     data = {
