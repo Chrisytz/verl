@@ -946,6 +946,7 @@ class RayPPOTrainer:
         last_val_metrics = None
 
         for epoch in range(self.config.trainer.total_epochs):
+            print("NUMBER OF BATCH DICTS IN TRAIN DATALOADER ", len(self.train_dataloader))
             for i, batch_dict in enumerate(self.train_dataloader):
                 print("ONE ITERATION OF TRAINING", i)
                 metrics = {}
@@ -970,44 +971,44 @@ class RayPPOTrainer:
 
                 with _timer("step", timing_raw):
                     # generate a batch
-                    # with _timer("gen", timing_raw):
-                    #     if not self.async_rollout_mode:
-                    #         gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
-                    #     else:
-                    #         self.async_rollout_manager.wake_up()
-                    #         gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch)
-                    #         self.async_rollout_manager.sleep()
-                    #     timing_raw.update(gen_batch_output.meta_info["timing"])
-                    #     gen_batch_output.meta_info.pop("timing", None)
+                    with _timer("gen", timing_raw):
+                        if not self.async_rollout_mode:
+                            gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
+                        else:
+                            self.async_rollout_manager.wake_up()
+                            gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch)
+                            self.async_rollout_manager.sleep()
+                        timing_raw.update(gen_batch_output.meta_info["timing"])
+                        gen_batch_output.meta_info.pop("timing", None)
 
-                    # if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
-                    #     with _timer("gen_max", timing_raw):
-                    #         gen_baseline_batch = deepcopy(gen_batch)
-                    #         gen_baseline_batch.meta_info["do_sample"] = False
-                    #         gen_baseline_output = self.actor_rollout_wg.generate_sequences(gen_baseline_batch)
+                    if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
+                        with _timer("gen_max", timing_raw):
+                            gen_baseline_batch = deepcopy(gen_batch)
+                            gen_baseline_batch.meta_info["do_sample"] = False
+                            gen_baseline_output = self.actor_rollout_wg.generate_sequences(gen_baseline_batch)
 
-                    #         batch = batch.union(gen_baseline_output)
-                    #         reward_baseline_tensor = self.reward_fn(batch)
-                    #         reward_baseline_tensor = reward_baseline_tensor.sum(dim=-1)
+                            batch = batch.union(gen_baseline_output)
+                            reward_baseline_tensor = self.reward_fn(batch)
+                            reward_baseline_tensor = reward_baseline_tensor.sum(dim=-1)
 
-                    #         batch.pop(batch_keys=list(gen_baseline_output.batch.keys()))
+                            batch.pop(batch_keys=list(gen_baseline_output.batch.keys()))
 
-                    #         batch.batch["reward_baselines"] = reward_baseline_tensor
+                            batch.batch["reward_baselines"] = reward_baseline_tensor
 
-                    #         del gen_baseline_batch, gen_baseline_output
+                            del gen_baseline_batch, gen_baseline_output
 
                     batch.non_tensor_batch["uid"] = np.array([str(uuid.uuid4()) for _ in range(len(batch.batch))], dtype=object)
                     # repeat to align with repeated responses in rollout
                     batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
-                    # batch = batch.union(gen_batch_output)
-                    with open("/workspaces/batch.json", 'r', encoding='utf-8') as f:
-                        loaded_data = json.load(f)
-                        batch.batch["responses"] = torch.tensor(loaded_data["responses"], dtype=torch.int64)
-                        batch.batch["input_ids"] = torch.tensor(loaded_data["input_ids"], dtype=torch.int64)
-                        batch.batch["attention_mask"] = torch.tensor(loaded_data["attention_mask"], dtype=torch.int64)
-                        batch.batch["position_ids"] = torch.tensor(loaded_data["position_ids"], dtype=torch.int64)
-                        batch.batch["prompts"] = torch.tensor(loaded_data["prompts"], dtype=torch.int64)
-                        batch.batch["rollout_log_probs"] = torch.tensor(loaded_data["rollout_log_probs"], dtype=torch.float32)
+                    batch = batch.union(gen_batch_output)
+                    # with open("/workspaces/batch.json", 'r', encoding='utf-8') as f:
+                    #     loaded_data = json.load(f)
+                    #     batch.batch["responses"] = torch.tensor(loaded_data["responses"], dtype=torch.int64)
+                    #     batch.batch["input_ids"] = torch.tensor(loaded_data["input_ids"], dtype=torch.int64)
+                    #     batch.batch["attention_mask"] = torch.tensor(loaded_data["attention_mask"], dtype=torch.int64)
+                    #     batch.batch["position_ids"] = torch.tensor(loaded_data["position_ids"], dtype=torch.int64)
+                    #     batch.batch["prompts"] = torch.tensor(loaded_data["prompts"], dtype=torch.int64)
+                    #     batch.batch["rollout_log_probs"] = torch.tensor(loaded_data["rollout_log_probs"], dtype=torch.float32)
 
                     batch.batch["response_mask"] = compute_response_mask(batch)
                     # Balance the number of valid tokens across DP ranks.
@@ -1155,13 +1156,14 @@ class RayPPOTrainer:
                     if self.val_reward_fn is not None and self.config.trainer.test_freq > 0 and (is_last_step or self.global_steps % self.config.trainer.test_freq == 0):
                         with _timer("testing", timing_raw):
                             val_metrics: dict = self._validate()
+                            print("validated")
                             if is_last_step:
                                 last_val_metrics = val_metrics
                         metrics.update(val_metrics)
 
                     # if self.config.trainer.save_freq > 0 and (is_last_step or self.global_steps % self.config.trainer.save_freq == 0):
-                    with _timer("save_checkpoint", timing_raw):
-                        self._save_checkpoint()
+                    #     with _timer("save_checkpoint", timing_raw):
+                    #         self._save_checkpoint()
 
                 # training metrics
                 metrics.update(
