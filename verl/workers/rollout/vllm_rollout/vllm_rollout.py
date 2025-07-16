@@ -180,7 +180,7 @@ class vLLMRollout(BaseRollout):
             setattr(self.sampling_params, key, value)
 
     # @GPUMemoryLogger(role="vllm rollout spmd", logger=logger)
-    @torch.no_grad()
+    # @torch.no_grad()
     def generate_sequences(self, prompts: DataProto, **kwargs) -> DataProto:
         # rebuild vllm cache engine
         if self.config.free_cache_engine:

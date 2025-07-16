@@ -1000,7 +1000,6 @@ class RayPPOTrainer:
                     # repeat to align with repeated responses in rollout
                     batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
                     # batch = batch.union(gen_batch_output)
-                    breakpoint()
                     with open("/workspaces/batch.json", 'r', encoding='utf-8') as f:
                         loaded_data = json.load(f)
                         batch.batch["responses"] = torch.tensor(loaded_data["responses"], dtype=torch.int64)
@@ -1160,9 +1159,9 @@ class RayPPOTrainer:
                                 last_val_metrics = val_metrics
                         metrics.update(val_metrics)
 
-                    if self.config.trainer.save_freq > 0 and (is_last_step or self.global_steps % self.config.trainer.save_freq == 0):
-                        with _timer("save_checkpoint", timing_raw):
-                            self._save_checkpoint()
+                    # if self.config.trainer.save_freq > 0 and (is_last_step or self.global_steps % self.config.trainer.save_freq == 0):
+                    with _timer("save_checkpoint", timing_raw):
+                        self._save_checkpoint()
 
                 # training metrics
                 metrics.update(

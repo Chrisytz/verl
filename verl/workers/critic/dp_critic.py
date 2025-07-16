@@ -119,7 +119,7 @@ class DataParallelPPOCritic(BasePPOCritic):
                 values = values[:, -response_length - 1 : -1]
             else:
                 grad_context = torch.enable_grad() if enable_grad else torch.no_grad()
-                with grad_context:
+                with torch.enable_grad():
                     output = self.critic_module(
                         input_ids=input_ids,
                         attention_mask=attention_mask,
@@ -129,16 +129,14 @@ class DataParallelPPOCritic(BasePPOCritic):
                     )
                 
 
-                if hasattr(self.critic_module, "v_head"):
-                    # For trl.AutoModelForCausalLMWithValueHead
-                    values = output[2]
-                    values.requires_grad = True
+                    if hasattr(self.critic_module, "v_head"):
+                        # For trl.AutoModelForCausalLMWithValueHead
+                        values = output[2]
 
-                else:
-                    values = output.logits
-                    values.requires_grad_(True)
-
-                values = values[:, -response_length - 1 : -1].squeeze(-1)
+                    else:
+                        values = output.logits
+                    
+                    values = values[:, -response_length - 1 : -1].squeeze(-1)
             return values
 
     def _optimizer_step(self):
@@ -157,7 +155,7 @@ class DataParallelPPOCritic(BasePPOCritic):
             self.critic_optimizer.zero_grad()
         else:
             if self.device_name == "xla":
-                xm.optimizer_step(self.critic_optimizer)
+                xm.optimizer_step(self.critic_optimizer, barrier=True)
             else:
                 self.critic_optimizer.step()
         return grad_norm
@@ -256,34 +254,33 @@ class DataParallelPPOCritic(BasePPOCritic):
                     response_length = responses.size(1)
 
                     response_mask = attention_mask[:, -response_length:]
-
                     vpreds = self._forward_micro_batch(data, True)
 
                     # assert not torch.any(torch.isnan(vpreds)).item()
-
-                    vf_loss, vf_clipfrac = core_algos.compute_value_loss(
-                        vpreds=vpreds,
-                        values=values,
-                        returns=returns,
-                        response_mask=response_mask,
-                        cliprange_value=self.config.cliprange_value,
-                        loss_agg_mode=self.config.loss_agg_mode,
-                    )
-                    if self.config.use_dynamic_bsz:
-                        # relative to the dynamic bsz
-                        loss = vf_loss * (len(data) / self.config.ppo_mini_batch_size)
-                    else:
-                        loss = vf_loss / self.gradient_accumulation
+                    with torch.enable_grad():
+                        vf_loss, vf_clipfrac = core_algos.compute_value_loss(
+                            vpreds=vpreds,
+                            values=values,
+                            returns=returns,
+                            response_mask=response_mask,
+                            cliprange_value=self.config.cliprange_value,
+                            loss_agg_mode=self.config.loss_agg_mode,
+                        )
+                        if self.config.use_dynamic_bsz:
+                            # relative to the dynamic bsz
+                            loss = vf_loss * (len(data) / self.config.ppo_mini_batch_size)
+                        else:
+                            loss = vf_loss / self.gradient_accumulation
                     
-                    loss.backward()
+                        loss.backward()
 
-                    data = {
-                        "critic/vf_loss": vf_loss.detach().item(),
-                        "critic/vf_clipfrac": vf_clipfrac.detach().item(),
-                        "critic/vpred_mean": masked_mean(vpreds, response_mask).detach().item(),
-                    }
+                        data = {
+                            "critic/vf_loss": vf_loss.detach().item(),
+                            "critic/vf_clipfrac": vf_clipfrac.detach().item(),
+                            "critic/vpred_mean": masked_mean(vpreds, response_mask).detach().item(),
+                        }
 
-                    append_to_dict(metrics, data)
+                        append_to_dict(metrics, data)
 
                 grad_norm = self._optimizer_step()
                 data = {"critic/grad_norm": grad_norm.detach().item()}
