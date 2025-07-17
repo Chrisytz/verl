@@ -34,7 +34,6 @@ from verl.single_controller.base.decorator import Dispatch, register
 from verl.utils import hf_processor, hf_tokenizer
 from verl.utils.activation_offload import enable_activation_offloading
 from verl.utils.checkpoint.fsdp_checkpoint_manager import FSDPCheckpointManager
-from verl.utils.debug import log_gpu_memory_usage
 from verl.utils.debug.performance import _timer, reduce_timing
 from verl.utils.device import get_device_name, get_torch_device
 from verl.utils.flops_counter import FlopsCounter
@@ -152,7 +151,6 @@ class ActorRolloutRefWorker(Worker):
 
         assert role in ["actor", "ref"]
 
-        log_gpu_memory_usage(f"Before init {role} from HF AutoModel", logger=logger)
         local_path = model_path
 
         # note that we have to create model in fp32. Otherwise, the optimizer is in bf16, which is incorrect
@@ -349,26 +347,14 @@ class ActorRolloutRefWorker(Worker):
 
         if self._is_actor:
             self.flops_counter = FlopsCounter(self.actor_model_config)
-            self.checkpoint_manager = FSDPCheckpointManager(
-                model=self.actor_module_fsdp,
-                optimizer=self.actor.actor_optimizer,
-                lr_scheduler=self.actor_lr_scheduler,
-                processing_class=self.processor if self.processor is not None else self.tokenizer,
-                checkpoint_contents=self.config.actor.checkpoint,
-            )
+            #TODO: set checkpoint manager 
 
         if not self._is_actor and self._is_rollout:
             # If ActorRolloutRefWorker is initialized as a standalone rollout,
             # create a checkpoint manager for FSDP model to allow loading FSDP checkpoints for rollout.
 
             checkpoint_contents = OmegaConf.create({"load_contents": ["model"], "save_contents": []})
-            self.checkpoint_manager = FSDPCheckpointManager(
-                model=self.actor_module_fsdp,
-                optimizer=None,
-                lr_scheduler=None,
-                processing_class=self.processor if self.processor is not None else self.tokenizer,
-                checkpoint_contents=checkpoint_contents,
-            )
+            #TODO: set checkpoint manager
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def update_actor(self, data: DataProto):
@@ -505,8 +491,7 @@ class ActorRolloutRefWorker(Worker):
         if self._is_offload_param:
             load_fsdp_model_to_gpu(self.actor_module_fsdp)
 
-        self.checkpoint_manager.save_checkpoint(local_path=local_path, hdfs_path=hdfs_path, global_step=global_step, max_ckpt_to_keep=max_ckpt_to_keep)
-        dist.barrier()
+        #TODO: save checkpoint
 
         if self._is_offload_param:
             offload_fsdp_model_to_cpu(self.actor_module_fsdp)
@@ -518,7 +503,7 @@ class ActorRolloutRefWorker(Worker):
         if self._is_offload_param:
             load_fsdp_model_to_gpu(self.actor_module_fsdp)
 
-        self.checkpoint_manager.load_checkpoint(local_path=local_path, hdfs_path=hdfs_path, del_local_after_load=del_local_after_load)
+        #TODO: load checkpoint
 
         if self._is_offload_param:
             offload_fsdp_model_to_cpu(self.actor_module_fsdp)
@@ -529,20 +514,18 @@ class ActorRolloutRefWorker(Worker):
 
 class CriticWorker(Worker):
     def __init__(self, config):
-        #TODO (Issue https://github.com/Chrisytz/verl/issues/7): Remove return statement when implementing critic training
-        return
         super().__init__()
-        import torch.distributed
 
-        # if not torch.distributed.is_initialized():
-        #     torch.distributed.init_process_group(backend="nccl" if is_cuda_available else "hccl")
         self.config = config
         self.device_name = get_device_name()
 
         # build device mesh for Ulysses Sequence Parallel
-        world_size = torch.distributed.get_world_size()
+        world_size = int(os.environ.get("WORLD_SIZE", 1))
+
         fsdp_size = self.config.model.fsdp_config.fsdp_size
-        self.device_mesh = create_device_mesh(world_size=world_size, fsdp_size=fsdp_size)
+
+        self.ulysses_sequence_parallel_size = self.config.get("ulysses_sequence_parallel_size", 1)
+        dp = world_size // self.ulysses_sequence_parallel_size
 
         # set FSDP offload params
         self._is_offload_param = self.config.model.fsdp_config.param_offload
@@ -550,10 +533,10 @@ class CriticWorker(Worker):
 
         # normalize config
         self.config.ppo_mini_batch_size *= self.config.rollout_n
-        self.config.ppo_mini_batch_size //= torch.distributed.get_world_size() 
+        self.config.ppo_mini_batch_size //= world_size // self.ulysses_sequence_parallel_size
         if self.config.ppo_micro_batch_size is not None:
-            self.config.ppo_micro_batch_size //= torch.distributed.get_world_size() 
-            self.config.forward_micro_batch_size //= torch.distributed.get_world_size() 
+            self.config.ppo_micro_batch_size //= world_size // self.ulysses_sequence_parallel_size
+            self.config.forward_micro_batch_size //= world_size // self.ulysses_sequence_parallel_size
             self.config.ppo_micro_batch_size_per_gpu = self.config.ppo_micro_batch_size
             self.config.forward_micro_batch_size_per_gpu = self.config.forward_micro_batch_size
 
@@ -564,7 +547,6 @@ class CriticWorker(Worker):
     def _build_critic_model_optimizer(self, config):
         # the following line is necessary
         from torch import optim
-        from torch.distributed.fsdp import MixedPrecision
 
         from verl.utils.model import load_valuehead_model, print_model_size
         from verl.utils.torch_dtypes import PrecisionType
@@ -595,7 +577,7 @@ class CriticWorker(Worker):
 
         from transformers import AutoConfig
 
-        critic_model_config = AutoConfig.from_pretrained(local_path, attn_implementation="flash_attention_2", trust_remote_code=config.model.get("trust_remote_code", False))
+        critic_model_config = AutoConfig.from_pretrained(local_path, trust_remote_code=config.model.get("trust_remote_code", False))
         critic_model_config.num_labels = 1
         # patch for kimi-vl
         if getattr(critic_model_config, "model_type", None) == "kimi_vl":
@@ -605,13 +587,14 @@ class CriticWorker(Worker):
         critic_model_config.classifier_dropout = 0.0
         critic_model_config.hidden_dropout = "0"
         critic_model_config.summary_dropout_prob = 0.0
-
         critic_module = load_valuehead_model(
             local_path,
             torch_dtype,
             critic_model_config,
             config.model.get("trust_remote_code", False),
+            self.device_name
         )
+        critic_module.to(self.device_name)
 
         use_remove_padding = config.model.get("use_remove_padding", False)
 
@@ -622,67 +605,6 @@ class CriticWorker(Worker):
             print_model_size(critic_module)
 
         self.critic_model_config = critic_model_config
-
-        fsdp_config = self.config.model.fsdp_config
-        mixed_precision_config = fsdp_config.get("mixed_precision", None)
-        if mixed_precision_config is not None:
-            param_dtype = PrecisionType.to_dtype(mixed_precision_config.get("param_dtype", "bf16"))
-            reduce_dtype = PrecisionType.to_dtype(mixed_precision_config.get("reduce_dtype", "fp32"))
-            buffer_dtype = PrecisionType.to_dtype(mixed_precision_config.get("buffer_dtype", "fp32"))
-        else:
-            param_dtype = torch.bfloat16
-            reduce_dtype = torch.float32
-            buffer_dtype = torch.float32
-
-        mixed_precision = MixedPrecision(param_dtype=param_dtype, reduce_dtype=reduce_dtype, buffer_dtype=buffer_dtype)
-
-        auto_wrap_policy = get_fsdp_wrap_policy(module=critic_module, config=self.config.model.fsdp_config.wrap_policy)
-
-        log_gpu_memory_usage("Before critic FSDP", logger=None)
-
-        fsdp_mesh = self.device_mesh
-        sharding_strategy = get_sharding_strategy(fsdp_mesh)
-
-        # Note: We force turn off CPUOffload for critic because it causes incorrect results when using grad accumulation
-        if config.strategy == "fsdp":
-            critic_module = FSDP(
-                critic_module,
-                param_init_fn=init_fn,
-                use_orig_params=False,
-                auto_wrap_policy=auto_wrap_policy,
-                device_id=get_torch_device().current_device(),
-                sharding_strategy=sharding_strategy,
-                mixed_precision=mixed_precision,
-                sync_module_states=True,
-                forward_prefetch=self.config.model.fsdp_config.forward_prefetch,
-                device_mesh=self.device_mesh,
-                cpu_offload=None,
-            )
-        elif config.strategy == "fsdp2":
-            assert CPUOffloadPolicy is not None, "PyTorch version >= 2.4 is required for using fully_shard API (FSDP2)"
-            mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype, cast_forward_inputs=True)
-            offload_policy = None
-            if fsdp_config.offload_policy:
-                self._is_offload_param = False
-                self._is_offload_optimizer = False
-                offload_policy = CPUOffloadPolicy(pin_memory=True)
-
-            fsdp_kwargs = {
-                "mesh": fsdp_mesh,
-                "mp_policy": mp_policy,
-                "offload_policy": offload_policy,
-                "reshard_after_forward": fsdp_config.reshard_after_forward,
-            }
-            full_state = critic_module.state_dict()
-            apply_fsdp2(critic_module, fsdp_kwargs, fsdp_config)
-            fsdp2_load_full_state_dict(critic_module, full_state, fsdp_mesh, offload_policy)
-        else:
-            raise NotImplementedError(f"Unknown strategy {config.strategy}")
-
-        if config.model.get("enable_activation_offload", False):
-            enable_activation_offloading(critic_module, config.strategy)
-
-        log_gpu_memory_usage("After critic FSDP", logger=None)
 
         critic_optimizer = optim.AdamW(
             critic_module.parameters(),
@@ -714,8 +636,6 @@ class CriticWorker(Worker):
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def init_model(self):
-        #TODO (Issue https://github.com/Chrisytz/verl/issues/7): Remove return statement when implementing critic training
-        return
         # This is used to import external_lib into the huggingface systems
         import_external_libs(self.config.model.get("external_lib", None))
 
@@ -725,21 +645,13 @@ class CriticWorker(Worker):
 
         if self._is_offload_param:
             offload_fsdp_model_to_cpu(self.critic_module)
-            log_gpu_memory_usage("After offload critic model during init", logger=logger)
         if self._is_offload_optimizer:
             offload_fsdp_optimizer(optimizer=self.critic_optimizer)
-            log_gpu_memory_usage("After offload critic optimizer during init", logger=logger)
 
         self.critic = DataParallelPPOCritic(config=self.config, critic_module=self.critic_module, critic_optimizer=self.critic_optimizer)
 
         self.flops_counter = FlopsCounter(self.critic_model_config)
-        self.checkpoint_manager = FSDPCheckpointManager(
-            model=self.critic_module,
-            optimizer=self.critic_optimizer,
-            lr_scheduler=self.critic_lr_scheduler,
-            processing_class=self.processor if self.processor is not None else self.tokenizer,
-            checkpoint_contents=self.config.checkpoint,
-        )
+        #TODO: set checkpoint manager
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def compute_values(self, data: DataProto):
@@ -800,9 +712,7 @@ class CriticWorker(Worker):
         if self._is_offload_param:
             load_fsdp_model_to_gpu(self.critic_module)
 
-        self.checkpoint_manager.save_checkpoint(local_path=local_path, hdfs_path=hdfs_path, global_step=global_step, max_ckpt_to_keep=max_ckpt_to_keep)
-
-        torch.distributed.barrier()
+        #TODO: save checkpoint
         if self._is_offload_param:
             offload_fsdp_model_to_cpu(self.critic_module)
 
@@ -813,9 +723,7 @@ class CriticWorker(Worker):
         if self._is_offload_param:
             load_fsdp_model_to_gpu(self.critic_module)
 
-        self.checkpoint_manager.load_checkpoint(local_path=local_path, hdfs_path=hdfs_path, del_local_after_load=del_local_after_load)
-
-        torch.distributed.barrier()
+        #TODO: load checkpoint
         if self._is_offload_param:
             offload_fsdp_model_to_cpu(self.critic_module)
 

@@ -20,9 +20,6 @@ import logging
 import os
 
 import torch
-import torch.distributed
-from flash_attn.bert_padding import (index_first_axis, pad_input, rearrange,
-                                     unpad_input)
 from torch import nn, optim
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 
@@ -145,7 +142,11 @@ class DataParallelPPOCritic(BasePPOCritic):
             print(f"WARN: grad_norm is not finite: {grad_norm}")
             self.critic_optimizer.zero_grad()
         else:
-            self.critic_optimizer.step()
+            if self.device_name == "xla":
+                import torch_xla.core.xla_model as xm
+                xm.optimizer_step(self.critic_optimizer, barrier=True)
+            else:
+                self.critic_optimizer.step()
         return grad_norm
 
     @GPUMemoryLogger(role="dp critic", logger=logger)
@@ -240,26 +241,26 @@ class DataParallelPPOCritic(BasePPOCritic):
                     response_length = responses.size(1)
 
                     response_mask = attention_mask[:, -response_length:]
+                    with torch.enable_grad():
+                        vpreds = self._forward_micro_batch(data)
 
-                    vpreds = self._forward_micro_batch(data)
+                        # assert not torch.any(torch.isnan(vpreds)).item()
 
-                    # assert not torch.any(torch.isnan(vpreds)).item()
+                        vf_loss, vf_clipfrac = core_algos.compute_value_loss(
+                            vpreds=vpreds,
+                            values=values,
+                            returns=returns,
+                            response_mask=response_mask,
+                            cliprange_value=self.config.cliprange_value,
+                            loss_agg_mode=self.config.loss_agg_mode,
+                        )
+                        if self.config.use_dynamic_bsz:
+                            # relative to the dynamic bsz
+                            loss = vf_loss * (len(data) / self.config.ppo_mini_batch_size)
+                        else:
+                            loss = vf_loss / self.gradient_accumulation
 
-                    vf_loss, vf_clipfrac = core_algos.compute_value_loss(
-                        vpreds=vpreds,
-                        values=values,
-                        returns=returns,
-                        response_mask=response_mask,
-                        cliprange_value=self.config.cliprange_value,
-                        loss_agg_mode=self.config.loss_agg_mode,
-                    )
-                    if self.config.use_dynamic_bsz:
-                        # relative to the dynamic bsz
-                        loss = vf_loss * (len(data) / self.config.ppo_mini_batch_size)
-                    else:
-                        loss = vf_loss / self.gradient_accumulation
-
-                    loss.backward()
+                        loss.backward()
 
                     data = {
                         "critic/vf_loss": vf_loss.detach().item(),
