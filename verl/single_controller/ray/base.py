@@ -115,7 +115,7 @@ class RayResourcePool(ResourcePool):
 
         bundle = {"CPU": self.max_colocate_count}
         if self.use_accelerator:
-            bundle[device_name] = 1
+            bundle[device_name] = 4
             if self.accelerator_type is not None:
                 bundle[self.accelerator_type] = 1e-4
 
@@ -192,7 +192,7 @@ class RayClassWithInitArgs(ClassWithInitArgs):
         """
         self._options.update(options)
 
-    def __call__(self, placement_group, placement_group_bundle_idx, use_accelerator: bool = True, num_accelerators=1, sharing_with=None, device_name="tpu") -> Any:
+    def __call__(self, placement_group, placement_group_bundle_idx, use_accelerator: bool = True, num_accelerators=4, sharing_with=None, device_name="tpu") -> Any:
         """Create and return a Ray actor with the configured options.
 
         Args:
@@ -206,6 +206,7 @@ class RayClassWithInitArgs(ClassWithInitArgs):
         Returns:
             A Ray actor handle with the configured options
         """
+        breakpoint()
         if sharing_with is not None:
             target_node_id = ray.get(sharing_with.get_node_id.remote())
             cuda_visible_devices = ray.get(sharing_with.get_cuda_visible_devices.remote())
@@ -220,7 +221,7 @@ class RayClassWithInitArgs(ClassWithInitArgs):
         if use_accelerator and device_name == "npu":
             options["resources"] = {"NPU": num_accelerators}
         if use_accelerator and device_name == "tpu":
-            options["resources"] = {"TPU": num_accelerators}
+            options["resources"] = {"TPU": 4}
 
         if len(self._additional_resource) > 1:
             for k, v in self._additional_resource.items():
