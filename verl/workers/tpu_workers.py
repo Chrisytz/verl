@@ -21,8 +21,6 @@ import warnings
 
 import psutil
 import torch
-import torch.distributed
-import torch.distributed as dist
 from codetiming import Timer
 from omegaconf import DictConfig, open_dict
 from torch.distributed.device_mesh import init_device_mesh
@@ -33,19 +31,12 @@ from verl.single_controller.base import Worker
 from verl.single_controller.base.decorator import Dispatch, register
 from verl.utils import hf_processor, hf_tokenizer
 from verl.utils.activation_offload import enable_activation_offloading
-from verl.utils.checkpoint.fsdp_checkpoint_manager import FSDPCheckpointManager
 from verl.utils.debug.performance import _timer, reduce_timing
 from verl.utils.device import get_device_name, get_torch_device
 from verl.utils.flops_counter import FlopsCounter
 from verl.utils.fs import copy_to_local
 from verl.utils.fsdp_utils import (
-    CPUOffloadPolicy,
-    MixedPrecisionPolicy,
-    apply_fsdp2,
-    fsdp2_load_full_state_dict,
     fsdp_version,
-    get_fsdp_wrap_policy,
-    init_fn,
     load_fsdp_model_to_gpu,
     load_fsdp_optimizer,
     offload_fsdp_model_to_cpu,
@@ -88,7 +79,6 @@ class ActorRolloutRefWorker(Worker):
         self.config = config
         self.device_name = get_device_name()
 
-        rank = int (os.environ.get("RANK", 0))
         world_size = int(os.environ.get("WORLD_SIZE", 1))
 
         # TODO(sgm): support FSDP hybrid shard for larger model
@@ -280,9 +270,7 @@ class ActorRolloutRefWorker(Worker):
 
         override_model_config = OmegaConf.to_container(self.config.model.get("override_config", OmegaConf.create()))
 
-        use_remove_padding = self.config.model.get("use_remove_padding", False)
         use_shm = self.config.model.get("use_shm", False)
-        use_fused_kernels = self.config.model.get("use_fused_kernels", False)
 
         if self._is_actor or self._is_rollout:
             # we need the model for actor and rollout
@@ -321,9 +309,6 @@ class ActorRolloutRefWorker(Worker):
 
         if self._is_actor:
             OmegaConf.set_struct(self.config.actor, True)
-            with open_dict(self.config.actor):
-                self.config.actor.use_remove_padding = use_remove_padding
-                self.config.actor.use_fused_kernels = use_fused_kernels
             self.actor = DataParallelPPOActor(config=self.config.actor, actor_module=self.actor_module_fsdp, actor_optimizer=self.actor_optimizer)
 
         if self._is_rollout:
@@ -340,9 +325,6 @@ class ActorRolloutRefWorker(Worker):
                 role="ref",
             )[0]
             OmegaConf.set_struct(self.config.ref, True)
-            with open_dict(self.config.ref):
-                self.config.ref.use_remove_padding = use_remove_padding
-                self.config.ref.use_fused_kernels = use_fused_kernels
             self.ref_policy = DataParallelPPOActor(config=self.config.ref, actor_module=self.ref_module_fsdp)
 
         if self._is_actor:
@@ -519,13 +501,7 @@ class CriticWorker(Worker):
         self.config = config
         self.device_name = get_device_name()
 
-        # build device mesh for Ulysses Sequence Parallel
         world_size = int(os.environ.get("WORLD_SIZE", 1))
-
-        fsdp_size = self.config.model.fsdp_config.fsdp_size
-
-        self.ulysses_sequence_parallel_size = self.config.get("ulysses_sequence_parallel_size", 1)
-        dp = world_size // self.ulysses_sequence_parallel_size
 
         # set FSDP offload params
         self._is_offload_param = self.config.model.fsdp_config.param_offload
@@ -533,10 +509,10 @@ class CriticWorker(Worker):
 
         # normalize config
         self.config.ppo_mini_batch_size *= self.config.rollout_n
-        self.config.ppo_mini_batch_size //= world_size // self.ulysses_sequence_parallel_size
+        self.config.ppo_mini_batch_size //= world_size 
         if self.config.ppo_micro_batch_size is not None:
-            self.config.ppo_micro_batch_size //= world_size // self.ulysses_sequence_parallel_size
-            self.config.forward_micro_batch_size //= world_size // self.ulysses_sequence_parallel_size
+            self.config.ppo_micro_batch_size //= world_size 
+            self.config.forward_micro_batch_size //= world_size 
             self.config.ppo_micro_batch_size_per_gpu = self.config.ppo_micro_batch_size
             self.config.forward_micro_batch_size_per_gpu = self.config.forward_micro_batch_size
 
@@ -595,8 +571,6 @@ class CriticWorker(Worker):
             self.device_name
         )
         critic_module.to(self.device_name)
-
-        use_remove_padding = config.model.get("use_remove_padding", False)
 
         # some parameters may not in torch_dtype
         critic_module.to(torch_dtype)
