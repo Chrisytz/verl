@@ -43,6 +43,8 @@ if is_cuda_available:
 elif is_npu_available:
     from transformers.integrations.npu_flash_attention import (
         index_first_axis, pad_input, rearrange, unpad_input)
+import torch_xla.debug.profiler as xp
+import torch_xla
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -177,6 +179,7 @@ class DataParallelPPOCritic(BasePPOCritic):
             with torch.no_grad():
                 values = self._forward_micro_batch(micro_batch)
             values_lst.append(values)
+            torch_xla.sync()
         values = torch.concat(values_lst, dim=0)
 
         if use_dynamic_bsz:
@@ -210,9 +213,11 @@ class DataParallelPPOCritic(BasePPOCritic):
             dataloader = data.select(select_keys, non_tensor_select_keys).chunk(num_mini_batches)
         else:
             dataloader = batch.split(self.config.ppo_mini_batch_size)
-
+        
         for epoch in range(self.config.ppo_epochs):
+            print(f"epoch {epoch} out of {self.config.ppo_epochs}")
             for batch_idx, data in enumerate(dataloader):
+                print(f"batch_idx {batch_idx} out of {len(dataloader)}")
                 # split batch into micro_batches
                 mini_batch = data
                 if has_multi_modal_inputs:
@@ -242,10 +247,11 @@ class DataParallelPPOCritic(BasePPOCritic):
 
                     response_mask = attention_mask[:, -response_length:]
                     with torch.enable_grad():
+                        # with xp.Trace("forward_micro_batch"):
                         vpreds = self._forward_micro_batch(data)
 
                         # assert not torch.any(torch.isnan(vpreds)).item()
-
+                        # with xp.Trace("compute_value_loss"):
                         vf_loss, vf_clipfrac = core_algos.compute_value_loss(
                             vpreds=vpreds,
                             values=values,
@@ -259,7 +265,7 @@ class DataParallelPPOCritic(BasePPOCritic):
                             loss = vf_loss * (len(data) / self.config.ppo_mini_batch_size)
                         else:
                             loss = vf_loss / self.gradient_accumulation
-
+                        # with xp.Trace("loss.backward()"):
                         loss.backward()
 
                     data = {
@@ -268,8 +274,11 @@ class DataParallelPPOCritic(BasePPOCritic):
                         "critic/vpred_mean": masked_mean(vpreds, response_mask).detach().item(),
                     }
 
-                    append_to_dict(metrics, data)
 
+
+                    append_to_dict(metrics, data)
+                    torch_xla.sync()
+                    
                 grad_norm = self._optimizer_step()
                 data = {"critic/grad_norm": grad_norm.detach().item()}
                 append_to_dict(metrics, data)

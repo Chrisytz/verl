@@ -43,6 +43,7 @@ if is_cuda_available:
 elif is_npu_available:
     from transformers.integrations.npu_flash_attention import index_first_axis, pad_input, rearrange, unpad_input
 
+import torch_xla
 
 __all__ = ["DataParallelPPOActor"]
 
@@ -312,6 +313,7 @@ class DataParallelPPOActor(BasePPOActor):
             log_probs_lst.append(log_probs)
             if calculate_entropy:
                 entropy_lst.append(entropy)
+            torch_xla.sync()
 
         log_probs = torch.concat(log_probs_lst, dim=0)
         entropys = None
@@ -447,6 +449,7 @@ class DataParallelPPOActor(BasePPOActor):
                         "actor/pg_clipfrac_lower": pg_clipfrac_lower.detach().item(),
                     }
                     append_to_dict(metrics, data)
+                    torch_xla.sync()
 
                 grad_norm = self._optimizer_step()
                 data = {"actor/grad_norm": grad_norm.detach().item()}

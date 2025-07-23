@@ -43,6 +43,7 @@ from verl.utils.fsdp_utils import (
     offload_fsdp_optimizer,
 )
 from verl.utils.import_utils import import_external_libs
+import torch_xla.debug.profiler as xp
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -129,8 +130,6 @@ class ActorRolloutRefWorker(Worker):
         fsdp_config,
         optim_config,
         override_model_config,
-        use_remove_padding=False,
-        use_fused_kernels=False,
         enable_gradient_checkpointing=False,
         trust_remote_code=False,
         role="actor",
@@ -277,6 +276,7 @@ class ActorRolloutRefWorker(Worker):
     def init_model(self):
         from verl.workers.actor import DataParallelPPOActor
 
+
         # This is used to import external_lib into the huggingface systems
         import_external_libs(self.config.model.get("external_lib", None))
 
@@ -420,6 +420,7 @@ class ActorRolloutRefWorker(Worker):
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def compute_log_prob(self, data: DataProto):
+        # xp.trace_detached('localhost:9010', "/workspaces/profiles", duration_ms=30000)
         assert self._is_actor
         if self._is_offload_param:
             load_fsdp_model_to_gpu(self.actor_module_fsdp)
@@ -625,6 +626,7 @@ class CriticWorker(Worker):
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def init_model(self):
+        # self.server = xp.start_server(9010)
         # This is used to import external_lib into the huggingface systems
         import_external_libs(self.config.model.get("external_lib", None))
 
@@ -664,6 +666,8 @@ class CriticWorker(Worker):
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def update_critic(self, data: DataProto):
+        # print("STARTING TRACE!!!!!")
+        # xp.trace_detached('localhost:9010', "/workspaces/profiles", duration_ms=300000)
         # Support all hardwares
         data = data.to(get_torch_device().current_device())
         if self._is_offload_param:
