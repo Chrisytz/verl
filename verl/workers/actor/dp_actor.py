@@ -316,6 +316,7 @@ class DataParallelPPOActor(BasePPOActor):
             if calculate_entropy:
                 entropy_lst.append(entropy)
             self.torch_xla.sync()
+        self.torch_xla.sync()
 
         log_probs = torch.concat(log_probs_lst, dim=0)
         entropys = None
@@ -454,7 +455,9 @@ class DataParallelPPOActor(BasePPOActor):
                     self.torch_xla.sync()
                     
                 grad_norm = self._optimizer_step()
+                self.torch_xla.sync()
                 data = {"actor/grad_norm": grad_norm.detach().item()}
                 append_to_dict(metrics, data)
+            self.torch_xla.sync()
         self.actor_optimizer.zero_grad()
         return metrics

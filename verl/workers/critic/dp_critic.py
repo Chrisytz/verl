@@ -182,6 +182,7 @@ class DataParallelPPOCritic(BasePPOCritic):
             values_lst.append(values)
             self.torch_xla.sync()
         values = torch.concat(values_lst, dim=0)
+        self.torch_xla.sync()
 
         if use_dynamic_bsz:
             indices = list(itertools.chain.from_iterable(indices))
@@ -276,7 +277,9 @@ class DataParallelPPOCritic(BasePPOCritic):
                     self.torch_xla.sync()
 
                 grad_norm = self._optimizer_step()
+                self.torch_xla.sync()
                 data = {"critic/grad_norm": grad_norm.detach().item()}
                 append_to_dict(metrics, data)
+            self.torch_xla.sync()
         self.critic_optimizer.zero_grad()
         return metrics
