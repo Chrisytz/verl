@@ -59,6 +59,10 @@ class DataParallelPPOCritic(BasePPOCritic):
         self.ulysses_sequence_parallel_size = self.config.get("ulysses_sequence_parallel_size", 1)
         self.device_name = get_device_name()
 
+        if self.device_name == "xla":
+            import torch_xla
+            self.torch_xla = torch_xla
+
     def _forward_micro_batch(self, micro_batch):
         response_length = micro_batch["responses"].size(-1)
         multi_modal_inputs = {}
@@ -143,8 +147,7 @@ class DataParallelPPOCritic(BasePPOCritic):
             self.critic_optimizer.zero_grad()
         else:
             if self.device_name == "xla":
-                import torch_xla.core.xla_model as xm
-                xm.optimizer_step(self.critic_optimizer, barrier=True)
+                self.torch_xla.core.xla_model.optimizer_step(self.critic_optimizer, barrier=True)
             else:
                 self.critic_optimizer.step()
         return grad_norm
@@ -177,6 +180,7 @@ class DataParallelPPOCritic(BasePPOCritic):
             with torch.no_grad():
                 values = self._forward_micro_batch(micro_batch)
             values_lst.append(values)
+            self.torch_xla.sync()
         values = torch.concat(values_lst, dim=0)
 
         if use_dynamic_bsz:
@@ -269,6 +273,7 @@ class DataParallelPPOCritic(BasePPOCritic):
                     }
 
                     append_to_dict(metrics, data)
+                    self.torch_xla.sync()
 
                 grad_norm = self._optimizer_step()
                 data = {"critic/grad_norm": grad_norm.detach().item()}

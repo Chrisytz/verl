@@ -22,50 +22,20 @@ import warnings
 import psutil
 import torch
 from codetiming import Timer
-from omegaconf import DictConfig, open_dict
-from torch.distributed.device_mesh import init_device_mesh
-from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+from omegaconf import DictConfig
 
 from verl import DataProto
 from verl.single_controller.base import Worker
 from verl.single_controller.base.decorator import Dispatch, register
 from verl.utils import hf_processor, hf_tokenizer
-from verl.utils.activation_offload import enable_activation_offloading
 from verl.utils.debug.performance import _timer, reduce_timing
 from verl.utils.device import get_device_name, get_torch_device
 from verl.utils.flops_counter import FlopsCounter
 from verl.utils.fs import copy_to_local
-from verl.utils.fsdp_utils import (
-    fsdp_version,
-    load_fsdp_model_to_gpu,
-    load_fsdp_optimizer,
-    offload_fsdp_model_to_cpu,
-    offload_fsdp_optimizer,
-)
 from verl.utils.import_utils import import_external_libs
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
-
-
-def create_device_mesh(world_size, fsdp_size, device_name):
-    if fsdp_size < 0 or fsdp_size >= world_size:
-        device_mesh = init_device_mesh(device_name, mesh_shape=(world_size,), mesh_dim_names=["fsdp"])
-    else:
-        device_mesh = init_device_mesh(device_name, mesh_shape=(world_size // fsdp_size, fsdp_size), mesh_dim_names=["ddp", "fsdp"])
-    return device_mesh
-
-
-def get_sharding_strategy(device_mesh):
-    from torch.distributed.fsdp import ShardingStrategy
-
-    if device_mesh.ndim == 1:
-        sharding_strategy = ShardingStrategy.FULL_SHARD
-    elif device_mesh.ndim == 2:
-        sharding_strategy = ShardingStrategy.HYBRID_SHARD
-    else:
-        raise NotImplementedError(f"Get device mesh ndim={device_mesh.ndim}, but only support 1 or 2")
-    return sharding_strategy
 
 
 class ActorRolloutRefWorker(Worker):
@@ -81,7 +51,6 @@ class ActorRolloutRefWorker(Worker):
 
         world_size = int(os.environ.get("WORLD_SIZE", 1))
 
-        # TODO(sgm): support FSDP hybrid shard for larger model
         self.device_mesh_size = world_size
 
         self.role = role
@@ -90,15 +59,6 @@ class ActorRolloutRefWorker(Worker):
         self._is_actor = self.role in ["actor", "actor_rollout", "actor_rollout_ref"]
         self._is_rollout = self.role in ["rollout", "actor_rollout", "actor_rollout_ref"]
         self._is_ref = self.role in ["ref", "actor_rollout_ref"]
-
-        self._is_offload_param = False
-        self._is_offload_optimizer = False
-        if self._is_actor:
-            self._is_offload_param = self.config.actor.fsdp_config.get("param_offload", False)
-            self._is_offload_optimizer = self.config.actor.fsdp_config.get("optimizer_offload", False)
-        elif self._is_ref:
-            # TODO: it seems that manual offload is slowly than FSDP offload
-            self._is_offload_param = self.config.ref.fsdp_config.get("param_offload", False)
 
         # normalize config
         if self._is_actor:
@@ -130,8 +90,7 @@ class ActorRolloutRefWorker(Worker):
         optim_config,
         override_model_config,
         trust_remote_code=False,
-        role="actor",
-        enable_activation_offload=False,
+        role="actor"
     ):
         from torch import optim
         from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForVision2Seq
@@ -144,7 +103,6 @@ class ActorRolloutRefWorker(Worker):
         local_path = model_path
 
         # note that we have to create model in fp32. Otherwise, the optimizer is in bf16, which is incorrect
-        # TODO(zhangchi.usc1992): 1. support create from random initialized model. 2. Support init with FSDP directly
         self.tokenizer = hf_tokenizer(local_path, trust_remote_code=trust_remote_code)
         self.processor = hf_processor(local_path, trust_remote_code=trust_remote_code)
 
@@ -185,27 +143,18 @@ class ActorRolloutRefWorker(Worker):
             config=actor_model_config,
             trust_remote_code=trust_remote_code,
         )
+        actor_module.to(get_torch_device().current_device())
 
         actor_module.to(torch_dtype)
 
         if self.rank == 0:
             print_model_size(actor_module)
 
-        # TODO: add transformer policy
-        # We force reference policy to use CPUOffload to save memory.
-        # We force turn off CPUOffload for actor because it causes incorrect results when using grad accumulation
-        fsdp_strategy = self.config.actor.strategy
-        actor_module_fsdp = actor_module
-
-        if enable_activation_offload:
-            enable_activation_offloading(actor_module_fsdp, fsdp_strategy)
-
-        # TODO: add more optimizer args into config
         if role == "actor" and optim_config is not None:
             from verl.utils.torch_functional import get_constant_schedule_with_warmup, get_cosine_schedule_with_warmup
 
             actor_optimizer = optim.AdamW(
-                actor_module_fsdp.parameters(),
+                actor_module.parameters(),
                 lr=optim_config.lr,
                 betas=optim_config.get("betas", (0.9, 0.999)),
                 weight_decay=optim_config.get("weight_decay", 1e-2),
@@ -234,13 +183,11 @@ class ActorRolloutRefWorker(Worker):
             actor_optimizer = None
             actor_lr_scheduler = None
 
-        return actor_module_fsdp, actor_optimizer, actor_lr_scheduler, actor_model_config
+        return actor_module, actor_optimizer, actor_lr_scheduler, actor_model_config
 
     def _build_rollout(self, trust_remote_code=False):
 
-        # TODO(sgm): support FSDP hybrid shard for larger model
         infer_tp = self.config.rollout.tensor_model_parallel_size
-        dp = self.world_size // infer_tp
         assert self.world_size % infer_tp == 0, f"rollout world_size: {self.world_size} is not divisible by infer_tp: {infer_tp}"
         rollout_name = self.config.rollout.name
         assert rollout_name == "vllm"
@@ -293,19 +240,8 @@ class ActorRolloutRefWorker(Worker):
                 optim_config=optim_config,
                 override_model_config=override_model_config,
                 trust_remote_code=self.config.model.get("trust_remote_code", False),
-                role="actor",
-                enable_activation_offload=self.config.model.get("enable_activation_offload", False),
+                role="actor"
             )
-
-            # get the original unwrapped module
-            if fsdp_version(self.actor_module_fsdp) == 1:
-                self.actor_module = self.actor_module_fsdp._fsdp_wrapped_module
-
-            if self._is_offload_param:
-                offload_fsdp_model_to_cpu(self.actor_module_fsdp)
-
-            if self._is_offload_optimizer:
-                offload_fsdp_optimizer(optimizer=self.actor_optimizer)
 
         if self._is_actor:
             OmegaConf.set_struct(self.config.actor, True)
@@ -329,14 +265,8 @@ class ActorRolloutRefWorker(Worker):
 
         if self._is_actor:
             self.flops_counter = FlopsCounter(self.actor_model_config)
-            #TODO: set checkpoint manager 
 
-        if not self._is_actor and self._is_rollout:
-            # If ActorRolloutRefWorker is initialized as a standalone rollout,
-            # create a checkpoint manager for FSDP model to allow loading FSDP checkpoints for rollout.
-
-            checkpoint_contents = OmegaConf.create({"load_contents": ["model"], "save_contents": []})
-            #TODO: set checkpoint manager
+        #TODO: create a checkpoint manager to allow loading checkpoints for rollout
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def update_actor(self, data: DataProto):
@@ -344,10 +274,6 @@ class ActorRolloutRefWorker(Worker):
         data = data.to('cpu')  # data will to device with each micro batch on actor.update_policy
 
         assert self._is_actor
-        if self._is_offload_param:
-            load_fsdp_model_to_gpu(self.actor_module_fsdp)
-        if self._is_offload_optimizer:
-            load_fsdp_optimizer(optimizer=self.actor_optimizer, device_id=get_torch_device().current_device())
 
         # perform training
         with Timer(name="update_policy", logger=None) as timer:
@@ -364,14 +290,8 @@ class ActorRolloutRefWorker(Worker):
         metrics["actor/lr"] = lr
         self.actor_lr_scheduler.step()
 
-        # TODO: here, we should return all metrics
         output = DataProto(meta_info={"metrics": metrics})
         output = output.to("cpu")
-
-        if self._is_offload_param:
-            offload_fsdp_model_to_cpu(self.actor_module_fsdp)
-        if self._is_offload_optimizer:
-            offload_fsdp_optimizer(optimizer=self.actor_optimizer)
 
         return output
 
@@ -392,10 +312,6 @@ class ActorRolloutRefWorker(Worker):
         with _timer("generate_sequences", timing_generate):
             output = self.rollout.generate_sequences(prompts=prompts)
 
-        # timing_generate.update(self.rollout_sharding_manager.timing)
-        # # We calculate the average timing across all ranks
-        # # to make sure meta_info["timing"] is the same
-        timing_generate = reduce_timing(timing_generate)
         output.meta_info["timing"] = timing_generate
         output = output.to("cpu")
 
@@ -406,8 +322,6 @@ class ActorRolloutRefWorker(Worker):
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def compute_log_prob(self, data: DataProto):
         assert self._is_actor
-        if self._is_offload_param:
-            load_fsdp_model_to_gpu(self.actor_module_fsdp)
 
         # Support all hardwares
         from contextlib import nullcontext
@@ -426,14 +340,6 @@ class ActorRolloutRefWorker(Worker):
         )
 
         output = output.to("cpu")
-
-        # https://pytorch.org/docs/stable/notes/fsdp.html#fsdp-notes
-        # unshard the root FSDP module
-        if self.world_size > 1 and fsdp_version(self.actor.actor_module) == 1:
-            self.actor.actor_module._handle.reshard(True)
-
-        if self._is_offload_param:
-            offload_fsdp_model_to_cpu(self.actor_module_fsdp)
 
         return output
 
@@ -456,42 +362,8 @@ class ActorRolloutRefWorker(Worker):
 
         output = output.to("cpu")
 
-        # https://pytorch.org/docs/stable/notes/fsdp.html#fsdp-notes
-        # unshard the root FSDP module
-        if self.world_size > 1 and fsdp_version(self.ref_policy.actor_module) == 1:
-            self.ref_policy.actor_module._handle.reshard(True)
-
         return output
 
-    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
-    def save_checkpoint(self, local_path, hdfs_path=None, global_step=0, max_ckpt_to_keep=None):
-        from verl.utils.logger import log_with_rank
-
-        # only support save and load ckpt for actor
-        assert self._is_actor
-
-        if self._is_offload_param:
-            load_fsdp_model_to_gpu(self.actor_module_fsdp)
-
-        #TODO: save checkpoint
-
-        if self._is_offload_param:
-            offload_fsdp_model_to_cpu(self.actor_module_fsdp)
-
-    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
-    def load_checkpoint(self, local_path, hdfs_path=None, del_local_after_load=False):
-        assert self._is_actor or (not self._is_actor and self._is_rollout), f"Checkpoint loading is only supported for Actor or standalone Rollout Workers, but got {self._is_actor} and {self._is_rollout}"
-
-        if self._is_offload_param:
-            load_fsdp_model_to_gpu(self.actor_module_fsdp)
-
-        #TODO: load checkpoint
-
-        if self._is_offload_param:
-            offload_fsdp_model_to_cpu(self.actor_module_fsdp)
-
-        if self._is_offload_optimizer:
-            offload_fsdp_optimizer(self.actor_optimizer)
 
 
 class CriticWorker(Worker):
@@ -502,10 +374,6 @@ class CriticWorker(Worker):
         self.device_name = get_device_name()
 
         world_size = int(os.environ.get("WORLD_SIZE", 1))
-
-        # set FSDP offload params
-        self._is_offload_param = self.config.model.fsdp_config.param_offload
-        self._is_offload_optimizer = self.config.model.fsdp_config.optimizer_offload
 
         # normalize config
         self.config.ppo_mini_batch_size *= self.config.rollout_n
@@ -617,11 +485,6 @@ class CriticWorker(Worker):
 
         self.critic_module, self.critic_optimizer, self.critic_lr_scheduler = self._build_critic_model_optimizer(self.config)
 
-        if self._is_offload_param:
-            offload_fsdp_model_to_cpu(self.critic_module)
-        if self._is_offload_optimizer:
-            offload_fsdp_optimizer(optimizer=self.critic_optimizer)
-
         self.critic = DataParallelPPOCritic(config=self.config, critic_module=self.critic_module, critic_optimizer=self.critic_optimizer)
 
         self.flops_counter = FlopsCounter(self.critic_model_config)
@@ -632,8 +495,6 @@ class CriticWorker(Worker):
         # Support all hardwares
         data = data.to(get_torch_device().current_device())
 
-        if self._is_offload_param:
-            load_fsdp_model_to_gpu(self.critic_module)
         micro_batch_size = self.config.forward_micro_batch_size_per_gpu
         data.meta_info["micro_batch_size"] = micro_batch_size
         data.meta_info["max_token_len"] = self.config.forward_max_token_len_per_gpu
@@ -643,20 +504,13 @@ class CriticWorker(Worker):
         output = DataProto.from_dict(tensors={"values": values})
 
         output = output.to("cpu")
-        if self._is_offload_param:
-            offload_fsdp_model_to_cpu(self.critic_module)
         return output
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def update_critic(self, data: DataProto):
         # Support all hardwares
         data = data.to(get_torch_device().current_device())
-        if self._is_offload_param:
-            load_fsdp_model_to_gpu(self.critic_module)
-        if self._is_offload_optimizer:
-            load_fsdp_optimizer(optimizer=self.critic_optimizer, device_id=get_torch_device().current_device())
 
-        # perform forward computation
         with Timer(name="update_critic", logger=None) as timer:
             metrics = self.critic.update_critic(data=data)
         delta_time = timer.last
@@ -671,35 +525,7 @@ class CriticWorker(Worker):
 
         output = DataProto(batch=None, meta_info={"metrics": metrics})
 
-        if self._is_offload_param:
-            offload_fsdp_model_to_cpu(self.critic_module)
-        if self._is_offload_optimizer:
-            offload_fsdp_optimizer(optimizer=self.critic_optimizer)
 
         output = output.to("cpu")
         return output
 
-    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
-    def save_checkpoint(self, local_path, hdfs_path=None, global_step=0, max_ckpt_to_keep=None):
-        import torch
-
-        if self._is_offload_param:
-            load_fsdp_model_to_gpu(self.critic_module)
-
-        #TODO: save checkpoint
-        if self._is_offload_param:
-            offload_fsdp_model_to_cpu(self.critic_module)
-
-    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
-    def load_checkpoint(self, local_path, hdfs_path=None, del_local_after_load=True):
-        import torch
-
-        if self._is_offload_param:
-            load_fsdp_model_to_gpu(self.critic_module)
-
-        #TODO: load checkpoint
-        if self._is_offload_param:
-            offload_fsdp_model_to_cpu(self.critic_module)
-
-        if self._is_offload_optimizer:
-            offload_fsdp_optimizer(self.critic_optimizer)

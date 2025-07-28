@@ -58,6 +58,10 @@ class DataParallelPPOActor(BasePPOActor):
         self.actor_optimizer = actor_optimizer
         self.device_name = get_device_name()
 
+        if self.device_name == "xla":
+            import torch_xla
+            self.torch_xla = torch_xla
+
         self.use_remove_padding = self.config.get("use_remove_padding", False)
         if self.device_name != "xla" and torch.distributed.get_rank() == 0:
             print(f"Actor use_remove_padding={self.use_remove_padding}")
@@ -255,8 +259,7 @@ class DataParallelPPOActor(BasePPOActor):
             self.actor_optimizer.zero_grad()
         else:
             if self.device_name == "xla":
-                import torch_xla.core.xla_model as xm
-                xm.optimizer_step(self.actor_optimizer, barrier=True)
+                self.torch_xla.core.xla_model.optimizer_step(self.actor_optimizer, barrier=True)
             else:
                 self.actor_optimizer.step()
         return grad_norm
@@ -312,6 +315,7 @@ class DataParallelPPOActor(BasePPOActor):
             log_probs_lst.append(log_probs)
             if calculate_entropy:
                 entropy_lst.append(entropy)
+            self.torch_xla.sync()
 
         log_probs = torch.concat(log_probs_lst, dim=0)
         entropys = None
@@ -447,7 +451,8 @@ class DataParallelPPOActor(BasePPOActor):
                         "actor/pg_clipfrac_lower": pg_clipfrac_lower.detach().item(),
                     }
                     append_to_dict(metrics, data)
-
+                    self.torch_xla.sync()
+                    
                 grad_norm = self._optimizer_step()
                 data = {"actor/grad_norm": grad_norm.detach().item()}
                 append_to_dict(metrics, data)
