@@ -204,7 +204,7 @@ class ActorRolloutRefWorker(Worker):
             raise NotImplementedError("vllm_mode must be 'spmd' for tpu training")
         
 
-        return rollout, None
+        return rollout
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def init_model(self):
@@ -248,7 +248,7 @@ class ActorRolloutRefWorker(Worker):
             self.actor = DataParallelPPOActor(config=self.config.actor, actor_module=self.actor_module_fsdp, actor_optimizer=self.actor_optimizer)
 
         if self._is_rollout:
-            self.rollout, self.rollout_sharding_manager = self._build_rollout(trust_remote_code=self.config.model.get("trust_remote_code", False))
+            self.rollout = self._build_rollout(trust_remote_code=self.config.model.get("trust_remote_code", False))
 
         if self._is_ref:
             local_path = copy_to_local(self.config.model.path, use_shm=use_shm)
