@@ -33,6 +33,8 @@ from verl.utils.device import get_device_name, get_torch_device
 from verl.utils.flops_counter import FlopsCounter
 from verl.utils.fs import copy_to_local
 from verl.utils.import_utils import import_external_libs
+from verl.utils.model import convert_weight_keys
+from torch.distributed.tensor import DTensor
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -304,6 +306,11 @@ class ActorRolloutRefWorker(Worker):
         timing_generate = {}
 
         with _timer("generate_sequences", timing_generate):
+            params = self.actor_module_fsdp.state_dict()
+            params = convert_weight_keys(params, self.actor_module_fsdp)
+            model = self.rollout.inference_engine.llm_engine.model_executor.driver_worker.model_runner.model
+            loaded_params = model.load_weights(((name, param.to(self.device_name, non_blocking=True).full_tensor() if isinstance(param, DTensor) else param) for name, param in params.items()))
+            logger.info(f"vLLM load weights, loaded_params: {len(loaded_params) if loaded_params else -1}")
             output = self.rollout.generate_sequences(prompts=prompts)
 
         output.meta_info["timing"] = timing_generate

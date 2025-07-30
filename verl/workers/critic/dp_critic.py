@@ -231,7 +231,7 @@ class DataParallelPPOCritic(BasePPOCritic):
                     micro_batches = mini_batch.split(self.config.ppo_micro_batch_size_per_gpu)
                     self.gradient_accumulation = self.config.ppo_mini_batch_size // self.config.ppo_micro_batch_size_per_gpu
 
-                self.critic_optimizer.zero_grad()
+                self.critic_optimizer.zero_grad(set_to_none=True)
 
                 for data in micro_batches:
                     # Support all devices
@@ -266,6 +266,7 @@ class DataParallelPPOCritic(BasePPOCritic):
                             loss = vf_loss / self.gradient_accumulation
 
                         loss.backward()
+                        self.torch_xla.sync()
 
                     data = {
                         "critic/vf_loss": vf_loss.detach().item(),
@@ -274,12 +275,12 @@ class DataParallelPPOCritic(BasePPOCritic):
                     }
 
                     append_to_dict(metrics, data)
-                    self.torch_xla.sync()
 
                 grad_norm = self._optimizer_step()
                 self.torch_xla.sync()
                 data = {"critic/grad_norm": grad_norm.detach().item()}
                 append_to_dict(metrics, data)
             self.torch_xla.sync()
-        self.critic_optimizer.zero_grad()
+        self.critic_optimizer.zero_grad(set_to_none=True)
+        self.torch_xla.sync()
         return metrics

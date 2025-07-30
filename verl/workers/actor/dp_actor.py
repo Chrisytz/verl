@@ -374,7 +374,7 @@ class DataParallelPPOActor(BasePPOActor):
                     # split batch into micro_batches
                     micro_batches = mini_batch.split(self.config.ppo_micro_batch_size_per_gpu)
 
-                self.actor_optimizer.zero_grad()
+                self.actor_optimizer.zero_grad(set_to_none=True)
 
                 for data in micro_batches:
                     # Support all hardwares
@@ -444,7 +444,7 @@ class DataParallelPPOActor(BasePPOActor):
                         else:
                             loss = policy_loss / self.gradient_accumulation
                         loss.backward()
-
+                        self.torch_xla.sync()
                     data = {
                         "actor/pg_loss": pg_loss.detach().item(),
                         "actor/pg_clipfrac": pg_clipfrac.detach().item(),
@@ -452,12 +452,12 @@ class DataParallelPPOActor(BasePPOActor):
                         "actor/pg_clipfrac_lower": pg_clipfrac_lower.detach().item(),
                     }
                     append_to_dict(metrics, data)
-                    self.torch_xla.sync()
                     
                 grad_norm = self._optimizer_step()
                 self.torch_xla.sync()
                 data = {"actor/grad_norm": grad_norm.detach().item()}
                 append_to_dict(metrics, data)
             self.torch_xla.sync()
-        self.actor_optimizer.zero_grad()
+        self.actor_optimizer.zero_grad(set_to_none=True)
+        self.torch_xla.sync()
         return metrics
