@@ -92,7 +92,7 @@ data:
 actor_rollout_ref:
 
   # Whether it's a hybrid engine, currently only supports hybrid engine
-  hybrid_engine: true
+  hybrid_engine: false
 
   # common configs for the model
   model:
@@ -148,6 +148,9 @@ actor_rollout_ref:
   
     # fsdp, fsdp2, megatron or xla. fsdp backend used here.
     strategy: xla
+
+    # Whether to enable fsdp mode on TPU
+    enable_fsdp_xla: True
     
     # Split each sample into sub-batches of this size for PPO
     ppo_mini_batch_size: 256
@@ -277,6 +280,17 @@ actor_rollout_ref:
       # Only for FSDP1: FSDP1 configuration, prefetch the next forward-pass all-gather
       # before the current forward computation.
       forward_prefetch: False
+    
+    # configs for FSDP via SPMD in PyTorch/XLA
+    fsdp_spmd_config:
+
+      # # Have actor and critic share the same resource pool
+      # colocate_actor_critic: True
+
+      n_tpus: 4
+
+
+
 
   # Reference model config.
   # Reference model will be enabled when actor.use_kl_loss or/and algorithm.use_kl_in_reward is/are True.
@@ -332,6 +346,7 @@ actor_rollout_ref:
 
   # Rollout model config.
   rollout:
+    strategy: xla
 
     # actor_rollout_ref.rollout.name: hf/vllm/sglang.
     name: vllm
@@ -492,6 +507,9 @@ critic:
 
   # fsdp, fsdp2 or xla strategy used for critic model training
   strategy: xla 
+
+  # Whether to enable fsdp mode on TPU
+  enable_fsdp_xla: ${actor_rollout_ref.actor.enable_fsdp_xla}
 
   # optimizer configs
   optim:

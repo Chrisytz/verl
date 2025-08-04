@@ -29,13 +29,13 @@ from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 import verl.utils.torch_functional as verl_F
 from verl import DataProto
 from verl.trainer.ppo.core_algos import agg_loss, compute_policy_loss, kl_penalty
-from verl.utils.debug import GPUMemoryLogger
 from verl.utils.device import get_device_name, get_torch_device, is_cuda_available, is_npu_available
 from verl.utils.fsdp_utils import FSDPModule, fsdp2_clip_grad_norm_
 from verl.utils.py_functional import append_to_dict
 from verl.utils.seqlen_balancing import get_reverse_idx, rearrange_micro_batches
 from verl.utils.torch_functional import logprobs_from_logits
 from verl.utils.ulysses import gather_outpus_and_unpad, ulysses_pad, ulysses_pad_and_slice_inputs
+from verl.utils.tpu_utils import shard_input_data, conditional_gpu_logger
 from verl.workers.actor import BasePPOActor
 
 if is_cuda_available:
@@ -82,6 +82,14 @@ class DataParallelPPOActor(BasePPOActor):
             if self.config.get("use_torch_compile", True)  #  use torch compile by default
             else entropy_from_logits
         )
+
+        self.compute_log_prob = conditional_gpu_logger(
+            strategy=self.config.strategy, role="dp actor", logger=logger
+        )(self.compute_log_prob)
+        
+        self.update_policy = conditional_gpu_logger(
+            strategy=self.config.strategy, role="dp critic", logger=logger
+        )(self.update_policy)
 
     def _forward_micro_batch(self, micro_batch, temperature, calculate_entropy=False) -> Tuple[torch.Tensor, torch.Tensor]:
         """
@@ -263,7 +271,6 @@ class DataParallelPPOActor(BasePPOActor):
             self.actor_optimizer.step()
         return grad_norm
 
-    @GPUMemoryLogger(role="dp actor", logger=logger)
     def compute_log_prob(self, data: DataProto, calculate_entropy=False) -> torch.Tensor:
         """Compute the log probability of the responses given input_ids, attention_mask and position_ids
 
@@ -291,6 +298,10 @@ class DataParallelPPOActor(BasePPOActor):
 
         select_keys = ["responses", "input_ids", "attention_mask", "position_ids"]
         batch = data.select(batch_keys=select_keys).batch
+
+        if self.config.enable_fsdp_xla:
+            shard_input_data(batch.values())
+
         has_multi_modal_inputs = "multi_modal_inputs" in data.non_tensor_batch.keys()
 
         if has_multi_modal_inputs:
@@ -332,8 +343,7 @@ class DataParallelPPOActor(BasePPOActor):
                 entropys = entropys[revert_indices]
 
         return log_probs, entropys
-
-    @GPUMemoryLogger(role="dp actor", logger=logger)
+    
     def update_policy(self, data: DataProto):
         # make sure we are in training mode
         self.actor_module.train()
@@ -347,6 +357,10 @@ class DataParallelPPOActor(BasePPOActor):
         if self.config.use_kl_loss:
             select_keys.append("ref_log_prob")
         batch = data.select(batch_keys=select_keys).batch
+
+        if self.config.enable_fsdp_xla:
+            shard_input_data(batch.values())
+
         has_multi_modal_inputs = "multi_modal_inputs" in data.non_tensor_batch.keys()
 
         # Split to make minibatch iterator for updating the actor
@@ -462,7 +476,9 @@ class DataParallelPPOActor(BasePPOActor):
                 append_to_dict(metrics, data)
             if self.device_name == "xla":
                 torch_xla.sync()
+                torch_xla.core.xla_model.wait_device_ops()
         self.actor_optimizer.zero_grad(set_to_none=True)
         if self.device_name == "xla":
             torch_xla.sync()
+            torch_xla.core.xla_model.wait_device_ops()
         return metrics

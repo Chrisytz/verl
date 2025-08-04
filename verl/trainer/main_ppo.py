@@ -36,7 +36,7 @@ def run_ppo(config) -> None:
         # NCCL debug level, VLLM logging level, and allow runtime LoRA updating
         # `num_cpus` specifies the number of CPU cores Ray can use, obtained from the configuration
         ray.init(
-            runtime_env={"env_vars": {"TOKENIZERS_PARALLELISM": "true", "NCCL_DEBUG": "WARN", "VLLM_LOGGING_LEVEL": "WARN", "VLLM_ALLOW_RUNTIME_LORA_UPDATING": "true"}},
+            runtime_env={"env_vars": {"TOKENIZERS_PARALLELISM": "true", "NCCL_DEBUG": "WARN", "VLLM_LOGGING_LEVEL": "WARN", "VLLM_ALLOW_RUNTIME_LORA_UPDATING": "true", "RAY_DEBUG":"1"}},
             num_cpus=config.ray_init.num_cpus,
         )
     
@@ -114,20 +114,45 @@ class TaskRunner:
         from verl.trainer.ppo.ray_trainer import ResourcePoolManager, Role
 
         # Map roles to their corresponding remote worker classes.
-        role_worker_mapping = {
-            Role.ActorRollout: ray.remote(actor_rollout_cls),
-            Role.Critic: ray.remote(CriticWorker),
-        }
+        if config.actor_rollout_ref.actor.strategy == "xla" and config.actor_rollout_ref.actor.enable_fsdp_xla:
+            role_worker_mapping = {
+                Role.Actor: ray.remote(actor_rollout_cls),
+                Role.Rollout: ray.remote(actor_rollout_cls),
+                Role.Critic: ray.remote(CriticWorker),
+            }
+            
+            actor_critic_pool_id = "actor_critic_pool"
+            rollout_pool_id = "rollout_pool"
+
+            resource_pool_spec = {
+                actor_critic_pool_id: [config.trainer.n_tpus_per_node] * config.trainer.nnodes,
+                rollout_pool_id: [config.trainer.n_tpus_per_node] * config.trainer.nnodes,
+            }
+
+            mapping = {
+                Role.Actor: actor_critic_pool_id,
+                Role.Rollout: rollout_pool_id,
+                Role.Critic: actor_critic_pool_id,
+            }
+
+        else:
+            role_worker_mapping = {
+                Role.ActorRollout: ray.remote(actor_rollout_cls),
+                Role.Critic: ray.remote(CriticWorker),
+            }
 
         # Define the resource pool specification.
         # Map roles to the resource pool.
         global_pool_id = "global_pool"
+        actor_pool_id = "actor_pool"
+        critic_pool_id = "critic_pool"
         resource_pool_spec = {
-            global_pool_id: [config.trainer.n_gpus_per_node if config.trainer.device == "cuda" else config.trainer.n_tpus_per_node] * config.trainer.nnodes,
+            actor_pool_id: [config.trainer.n_gpus_per_node if config.trainer.device == "cuda" else config.trainer.n_tpus_per_node] * config.trainer.nnodes,
+            critic_pool_id: [config.trainer.n_gpus_per_node if config.trainer.device == "cuda" else config.trainer.n_tpus_per_node] * config.trainer.nnodes,
         }
         mapping = {
-            Role.ActorRollout: global_pool_id,
-            Role.Critic: global_pool_id,
+            Role.ActorRollout: actor_pool_id,
+            Role.Critic: critic_pool_id,
         }
 
         # We should adopt a multi-source reward function here:

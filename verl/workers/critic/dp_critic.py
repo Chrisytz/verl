@@ -26,7 +26,6 @@ from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 
 from verl import DataProto
 from verl.trainer.ppo import core_algos
-from verl.utils.debug import GPUMemoryLogger
 from verl.utils.device import (get_device_name, get_torch_device,
                                is_cuda_available, is_npu_available)
 from verl.utils.fsdp_utils import FSDPModule, fsdp2_clip_grad_norm_
@@ -36,6 +35,7 @@ from verl.utils.seqlen_balancing import (get_reverse_idx,
 from verl.utils.torch_functional import masked_mean
 from verl.utils.ulysses import (gather_outpus_and_unpad,
                                 ulysses_pad_and_slice_inputs)
+from verl.utils.tpu_utils import shard_input_data, conditional_gpu_logger
 from verl.workers.critic import BasePPOCritic
 
 if is_cuda_available:
@@ -49,6 +49,8 @@ else:
         import torch_xla
     except (ImportError, ModuleNotFoundError):
         print("Warning: torch_xla is not installed. Ignore this warning if not running on TPU.")
+
+import torch_xla.distributed.spmd as xs
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -64,6 +66,18 @@ class DataParallelPPOCritic(BasePPOCritic):
 
         self.ulysses_sequence_parallel_size = self.config.get("ulysses_sequence_parallel_size", 1)
         self.device_name = get_device_name()
+
+        if self.device_name == "xla":
+            import torch_xla
+            self.torch_xla = torch_xla
+
+        # self.compute_values = conditional_gpu_logger(
+        #     strategy=self.config.strategy, role="dp critic", logger=logger
+        # )(self.compute_values)
+        
+        # self.update_critic = conditional_gpu_logger(
+        #     strategy=self.config.strategy, role="dp critic", logger=logger
+        # )(self.update_critic)
 
     def _forward_micro_batch(self, micro_batch):
         response_length = micro_batch["responses"].size(-1)
@@ -151,12 +165,15 @@ class DataParallelPPOCritic(BasePPOCritic):
             self.critic_optimizer.step()
         return grad_norm
 
-    @GPUMemoryLogger(role="dp critic", logger=logger)
     def compute_values(self, data: DataProto) -> torch.Tensor:
         self.critic_module.eval()
         micro_batch_size = data.meta_info["micro_batch_size"]
         select_keys = ["responses", "input_ids", "attention_mask", "position_ids"]
         batch = data.select(batch_keys=select_keys).batch
+
+        if self.config.enable_fsdp_xla:
+            shard_input_data(batch.values())
+
         use_dynamic_bsz = data.meta_info["use_dynamic_bsz"]
         has_multi_modal_inputs = "multi_modal_inputs" in data.non_tensor_batch.keys()
 
@@ -198,7 +215,6 @@ class DataParallelPPOCritic(BasePPOCritic):
         values = values * response_mask # Only action tokens have values
         return values
 
-    @GPUMemoryLogger(role="dp critic", logger=logger)
     def update_critic(self, data: DataProto):
         # make sure we are in training mode
         self.critic_module.train()
@@ -206,6 +222,10 @@ class DataParallelPPOCritic(BasePPOCritic):
 
         select_keys = ["input_ids", "responses", "attention_mask", "position_ids", "values", "returns"]
         batch = data.select(batch_keys=select_keys).batch
+        
+        if self.config.enable_fsdp_xla:
+            shard_input_data(batch.values())
+
         has_multi_modal_inputs = "multi_modal_inputs" in data.non_tensor_batch.keys()
 
         # Split to make minibatch iterator for updating the actor
@@ -233,6 +253,8 @@ class DataParallelPPOCritic(BasePPOCritic):
                     self.gradient_accumulation = self.config.ppo_mini_batch_size // self.config.ppo_micro_batch_size_per_gpu
 
                 self.critic_optimizer.zero_grad(set_to_none=True)
+
+                print("CRITIC LENGTH MICROBATCHES", len(micro_batches))
 
                 for data in micro_batches:
                     # Support all devices
@@ -285,7 +307,9 @@ class DataParallelPPOCritic(BasePPOCritic):
                 append_to_dict(metrics, data)
             if self.device_name == "xla":
                 torch_xla.sync()
+                torch_xla.core.xla_model.wait_device_ops()
         self.critic_optimizer.zero_grad(set_to_none=True)
         if self.device_name == "xla":
             torch_xla.sync()
+            torch_xla.core.xla_model.wait_device_ops()
         return metrics
