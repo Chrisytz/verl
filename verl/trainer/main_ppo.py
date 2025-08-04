@@ -36,7 +36,7 @@ def run_ppo(config) -> None:
         # NCCL debug level, VLLM logging level, and allow runtime LoRA updating
         # `num_cpus` specifies the number of CPU cores Ray can use, obtained from the configuration
         ray.init(
-            runtime_env={"env_vars": {"TOKENIZERS_PARALLELISM": "true", "NCCL_DEBUG": "WARN", "VLLM_LOGGING_LEVEL": "WARN", "VLLM_ALLOW_RUNTIME_LORA_UPDATING": "true"}},
+            runtime_env={"env_vars": {"TOKENIZERS_PARALLELISM": "true", "NCCL_DEBUG": "WARN", "VLLM_LOGGING_LEVEL": "WARN", "VLLM_ALLOW_RUNTIME_LORA_UPDATING": "true", "RAY_DEBUG":"1"}},
             num_cpus=config.ray_init.num_cpus,
         )
     
@@ -141,16 +141,19 @@ class TaskRunner:
                 Role.Critic: ray.remote(CriticWorker),
             }
 
-            global_pool_id = "global_pool"
-        
-            resource_pool_spec = {
-                global_pool_id: [config.trainer.n_gpus_per_node if config.trainer.device == "cuda" else config.trainer.n_tpus_per_node] * config.trainer.nnodes,
-            }
-
-            mapping = {
-                Role.ActorRollout: global_pool_id,
-                Role.Critic: global_pool_id,
-            }
+        # Define the resource pool specification.
+        # Map roles to the resource pool.
+        global_pool_id = "global_pool"
+        actor_pool_id = "actor_pool"
+        critic_pool_id = "critic_pool"
+        resource_pool_spec = {
+            actor_pool_id: [config.trainer.n_gpus_per_node if config.trainer.device == "cuda" else config.trainer.n_tpus_per_node] * config.trainer.nnodes,
+            critic_pool_id: [config.trainer.n_gpus_per_node if config.trainer.device == "cuda" else config.trainer.n_tpus_per_node] * config.trainer.nnodes,
+        }
+        mapping = {
+            Role.ActorRollout: actor_pool_id,
+            Role.Critic: critic_pool_id,
+        }
 
         # We should adopt a multi-source reward function here:
         # - for rule-based rm, we directly call a reward score
