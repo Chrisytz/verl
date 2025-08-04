@@ -753,7 +753,6 @@ class RayPPOTrainer:
         
         for resource_pool, class_dict in self.resource_pool_to_cls.items():
             for init_args_cls in class_dict.values():
-                print("AAAA", init_args_cls)
                 wg_dict = self.ray_worker_group_cls(resource_pool=resource_pool, ray_cls_with_init=init_args_cls, device_name=self.device_name, **wg_kwargs)
                 spawn_wg = wg_dict.spawn(prefix_set=class_dict.keys())
                 all_wg.update(spawn_wg)
