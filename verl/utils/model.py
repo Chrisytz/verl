@@ -501,17 +501,22 @@ def patch_valuehead_model(model) -> None:
     setattr(model, "_no_split_modules", getattr(model.pretrained_model, "_no_split_modules", []))
 
 
-def load_valuehead_model(local_path, torch_dtype, model_config, trust_remote_code):
+def load_valuehead_model(local_path, torch_dtype, model_config, trust_remote_code, device_name="cuda"):
     from transformers import AutoModelForTokenClassification, AutoModelForCausalLM, AutoModelForVision2Seq
 
     try:
-        model = AutoModelForTokenClassification.from_pretrained(
-            pretrained_model_name_or_path=local_path,
-            torch_dtype=torch_dtype,
-            config=model_config,
-            attn_implementation="flash_attention_2",
-            trust_remote_code=trust_remote_code,
-        )
+
+        kwargs = {
+            "pretrained_model_name_or_path": local_path,
+            "torch_dtype": torch_dtype,
+            "config": model_config,
+            "trust_remote_code": trust_remote_code,
+        }
+
+        if device_name != "xla":
+            kwargs["attn_implementation"] = "flash_attention_2"
+
+        model = AutoModelForTokenClassification.from_pretrained(**kwargs)
         return model
     except BaseException as e:
         if not is_trl_available():
@@ -525,13 +530,7 @@ def load_valuehead_model(local_path, torch_dtype, model_config, trust_remote_cod
         module_class = AutoModelForVision2Seq
     else:
         module_class = AutoModelForCausalLM
-    ori_model = module_class.from_pretrained(
-        pretrained_model_name_or_path=local_path,
-        torch_dtype=torch_dtype,
-        config=model_config,
-        attn_implementation="flash_attention_2",
-        trust_remote_code=trust_remote_code,
-    )
+    ori_model = module_class.from_pretrained(**kwargs)
     model = AutoModelForCausalLMWithValueHead.from_pretrained(ori_model)
     patch_valuehead_model(model)
     return model

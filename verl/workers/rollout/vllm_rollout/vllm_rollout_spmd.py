@@ -133,7 +133,6 @@ class vLLMRollout(BaseRollout):
             )
 
         trust_remote_code = kwargs.get("trust_remote_code", False)
-        load_format = "dummy" if config.load_format.startswith("dummy") else config.load_format
 
         lora_kwargs = kwargs.pop("lora_kwargs", {})
         self.lora_kwargs = lora_kwargs
@@ -159,7 +158,6 @@ class vLLMRollout(BaseRollout):
             disable_mm_preprocessor_cache=config.disable_mm_preprocessor_cache,
             skip_tokenizer_init=False,
             max_model_len=max_model_len,
-            load_format=load_format,
             disable_log_stats=config.disable_log_stats,
             max_num_batched_tokens=max_num_batched_tokens,
             enable_chunked_prefill=config.enable_chunked_prefill,

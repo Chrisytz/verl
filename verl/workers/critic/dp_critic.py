@@ -20,9 +20,6 @@ import logging
 import os
 
 import torch
-import torch.distributed
-from flash_attn.bert_padding import (index_first_axis, pad_input, rearrange,
-                                     unpad_input)
 from torch import nn, optim
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 
@@ -61,6 +58,10 @@ class DataParallelPPOCritic(BasePPOCritic):
 
         self.ulysses_sequence_parallel_size = self.config.get("ulysses_sequence_parallel_size", 1)
         self.device_name = get_device_name()
+
+        if self.device_name == "xla":
+            import torch_xla
+            self.torch_xla = torch_xla
 
     def _forward_micro_batch(self, micro_batch):
         response_length = micro_batch["responses"].size(-1)
@@ -145,7 +146,10 @@ class DataParallelPPOCritic(BasePPOCritic):
             print(f"WARN: grad_norm is not finite: {grad_norm}")
             self.critic_optimizer.zero_grad()
         else:
-            self.critic_optimizer.step()
+            if self.device_name == "xla":
+                self.torch_xla.core.xla_model.optimizer_step(self.critic_optimizer, barrier=True)
+            else:
+                self.critic_optimizer.step()
         return grad_norm
 
     @GPUMemoryLogger(role="dp critic", logger=logger)
@@ -176,7 +180,9 @@ class DataParallelPPOCritic(BasePPOCritic):
             with torch.no_grad():
                 values = self._forward_micro_batch(micro_batch)
             values_lst.append(values)
+            self.torch_xla.sync()
         values = torch.concat(values_lst, dim=0)
+        self.torch_xla.sync()
 
         if use_dynamic_bsz:
             indices = list(itertools.chain.from_iterable(indices))
@@ -225,7 +231,7 @@ class DataParallelPPOCritic(BasePPOCritic):
                     micro_batches = mini_batch.split(self.config.ppo_micro_batch_size_per_gpu)
                     self.gradient_accumulation = self.config.ppo_mini_batch_size // self.config.ppo_micro_batch_size_per_gpu
 
-                self.critic_optimizer.zero_grad()
+                self.critic_optimizer.zero_grad(set_to_none=True)
 
                 for data in micro_batches:
                     # Support all devices
@@ -240,26 +246,27 @@ class DataParallelPPOCritic(BasePPOCritic):
                     response_length = responses.size(1)
 
                     response_mask = attention_mask[:, -response_length:]
+                    with torch.enable_grad():
+                        vpreds = self._forward_micro_batch(data)
 
-                    vpreds = self._forward_micro_batch(data)
+                        # assert not torch.any(torch.isnan(vpreds)).item()
 
-                    # assert not torch.any(torch.isnan(vpreds)).item()
+                        vf_loss, vf_clipfrac = core_algos.compute_value_loss(
+                            vpreds=vpreds,
+                            values=values,
+                            returns=returns,
+                            response_mask=response_mask,
+                            cliprange_value=self.config.cliprange_value,
+                            loss_agg_mode=self.config.loss_agg_mode,
+                        )
+                        if self.config.use_dynamic_bsz:
+                            # relative to the dynamic bsz
+                            loss = vf_loss * (len(data) / self.config.ppo_mini_batch_size)
+                        else:
+                            loss = vf_loss / self.gradient_accumulation
 
-                    vf_loss, vf_clipfrac = core_algos.compute_value_loss(
-                        vpreds=vpreds,
-                        values=values,
-                        returns=returns,
-                        response_mask=response_mask,
-                        cliprange_value=self.config.cliprange_value,
-                        loss_agg_mode=self.config.loss_agg_mode,
-                    )
-                    if self.config.use_dynamic_bsz:
-                        # relative to the dynamic bsz
-                        loss = vf_loss * (len(data) / self.config.ppo_mini_batch_size)
-                    else:
-                        loss = vf_loss / self.gradient_accumulation
-
-                    loss.backward()
+                        loss.backward()
+                        self.torch_xla.sync()
 
                     data = {
                         "critic/vf_loss": vf_loss.detach().item(),
@@ -270,7 +277,10 @@ class DataParallelPPOCritic(BasePPOCritic):
                     append_to_dict(metrics, data)
 
                 grad_norm = self._optimizer_step()
+                self.torch_xla.sync()
                 data = {"critic/grad_norm": grad_norm.detach().item()}
                 append_to_dict(metrics, data)
-        self.critic_optimizer.zero_grad()
+            self.torch_xla.sync()
+        self.critic_optimizer.zero_grad(set_to_none=True)
+        self.torch_xla.sync()
         return metrics
