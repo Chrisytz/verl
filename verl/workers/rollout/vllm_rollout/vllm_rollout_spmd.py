@@ -146,6 +146,14 @@ class vLLMRollout(BaseRollout):
         if config.get("limit_images", None):  # support for multi-image data
             engine_kwargs["limit_mm_per_prompt"] = {"image": config.get("limit_images")}
 
+        llm_args = {
+            "model": "Qwen/Qwen2.5-0.5B-Instruct",
+            "max_num_batched_tokens": 8,
+            "max_num_seqs": 2,
+            "max_model_len": 8,
+            "gpu_memory_utilization": 0.2
+        }
+        # eakpoint()
         self.inference_engine = LLM(
             model=model_path,
             enable_sleep_mode=config.enable_sleep_mode,
@@ -191,6 +199,7 @@ class vLLMRollout(BaseRollout):
         self.sampling_params = SamplingParams(**kwargs)
 
         self.pad_token_id = tokenizer.pad_token_id
+        self.tokenizer = tokenizer
 
     @contextmanager
     def update_sampling_params(self, **kwargs):
@@ -208,7 +217,7 @@ class vLLMRollout(BaseRollout):
         for key, value in old_sampling_params_args.items():
             setattr(self.sampling_params, key, value)
 
-    @GPUMemoryLogger(role="vllm rollout spmd", logger=logger)
+    # @GPUMemoryLogger(role="vllm rollout spmd", logger=logger)
     @torch.no_grad()
     def generate_sequences(self, prompts: DataProto, **kwargs) -> DataProto:
         # rebuild vllm cache engine
@@ -283,13 +292,45 @@ class vLLMRollout(BaseRollout):
 
         # users can customize different sampling_params at different run
         with self.update_sampling_params(**kwargs):
-            outputs = self.inference_engine.generate(
-                prompts=vllm_inputs,  # because we have already convert it to prompt token id
-                sampling_params=self.sampling_params,
-                lora_request=lora_requests,
-                use_tqdm=False,
-            )
+            sampling_params = SamplingParams(temperature=1, top_p=1.0, n=1)
+            prompts = [
+                {'prompt_token_ids': [11109, 279, 5344]},
+                {'prompt_token_ids': [8948, 198, 2610, 525, 1207, 16948, 11, 3465, 553, 54364, 14817, 13, 1446, 525, 264, 10950, 17847, 624, 872, 198, 24732, 21189, 264, 400, 16, 17, 40358, 817, 2254, 13, 758, 279, 1156, 2003, 11, 566, 37102, 264, 4843, 315, 432, 26, 304, 279, 2086, 2003, 11, 566, 37102, 264, 8338, 315, 1128, 566, 702, 2115, 13, 2585, 1753, 3220, 1558, 566, 614, 2115, 311, 6248, 279, 2254, 30, 6771, 594, 1744, 3019, 553, 3019, 323, 2550, 279, 1590, 4226, 1283, 330, 820, 22956, 77091, 198]},
+                {'prompt_token_ids': [151644, 8948, 198, 2610, 525, 1207, 16948, 11, 3465, 553, 54364, 14817, 13, 1446, 525, 264, 10950, 17847, 13, 151645, 198, 151644, 872, 198, 24732, 21189, 264, 400, 16, 17, 40358, 817, 2254, 13, 758, 279, 1156, 2003, 11, 566, 37102, 264, 4843, 315, 432, 26, 304, 279, 2086, 2003, 11, 566, 37102, 264, 8338, 315, 1128, 566, 702, 2115, 13, 2585, 1753, 3220, 1558, 566, 614, 2115, 311, 6248, 279, 2254, 30, 6771, 594, 1744, 3019, 553, 3019, 323, 2550, 279, 1590, 4226, 1283, 330, 820, 3263, 151645, 198, 151644, 77091, 198]}
+            ]
+            vllm_input_prompts = [e for e in vllm_inputs]
 
+            outputs = self.inference_engine.generate(
+                prompts=vllm_input_prompts,
+                sampling_params=self.sampling_params
+            )
+            # output_list = []
+            # for e in vllm_inputs:
+            #     output = self.inference_engine.generate(
+            #         prompts = [e],
+            #         sampling_params=self.sampling_params
+            #     )
+            #     output_list.append(output[0])
+
+            outputs1 = self.inference_engine.generate(
+                prompts=prompts,  # because we have already convert it to prompt token id
+                sampling_params=self.sampling_params
+            )
+            
+
+            # outputs1 = self.inference_engine.generate(
+            #     prompts=prompts,
+            #     sampling_params=self.sampling_params
+            # )
+
+            # outputs2 = self.inference_engine.generate(
+            #     prompts=prompts,
+            #     sampling_params=sampling_params
+            # )
+
+
+
+            breakpoint()
             # TODO(sgm): disable logprob when recompute_log_prob is enable
             # if n = 1: (bs, response_length) ; if n > 1: (bs * n, response_length)
 

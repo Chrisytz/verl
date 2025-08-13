@@ -100,7 +100,7 @@ class RayResourcePool(ResourcePool):
         self.detached = detached
         self.accelerator_type = accelerator_type
 
-    def get_placement_groups(self, strategy="STRICT_PACK", name=None, device_name="tpu"):
+    def get_placement_groups(self, strategy="STRICT_PACK", name=None, device_name="tpu", num_accelerators=1):
         if self.pgs is not None:
             return self.pgs
 
@@ -113,9 +113,9 @@ class RayResourcePool(ResourcePool):
         elif device_name == "tpu":
             device_name = "TPU"
 
-        bundle = {"CPU": self.max_colocate_count}
+        bundle = {"CPU": max(self.max_colocate_count, num_accelerators)}
         if self.use_accelerator:
-            bundle[device_name] = 1
+            bundle[device_name] = num_accelerators
             if self.accelerator_type is not None:
                 bundle[self.accelerator_type] = 1e-4
 
@@ -325,11 +325,12 @@ class RayWorkerGroup(WorkerGroup):
         strategy = "PACK"
         if bin_pack:
             strategy = "STRICT_PACK"
-        pgs = resource_pool.get_placement_groups(strategy=strategy, device_name=self.device_name)
+            
+        num_accelerators = 1 / resource_pool.max_colocate_count
+        pgs = resource_pool.get_placement_groups(strategy=strategy, device_name=self.device_name, num_accelerators=num_accelerators)
         world_size = resource_pool.world_size
         self._world_size = world_size
         # cia.add_kwarg("_world_size", world_size)
-        num_accelerators = 1 / resource_pool.max_colocate_count
 
         rank = -1
         local_world_size = resource_pool.store[0]

@@ -35,6 +35,13 @@ from verl.utils.fs import copy_to_local
 from verl.utils.import_utils import import_external_libs
 from verl.utils.model import convert_weight_keys
 from torch.distributed.tensor import DTensor
+from torch_xla import runtime as xr
+import numpy as np
+import torch_xla.distributed.spmd as xs
+from torch_xla.experimental.spmd_fully_sharded_data_parallel import SpmdFullyShardedDataParallel as FSDPv2
+from torch_xla.distributed.fsdp.wrap import transformer_auto_wrap_policy
+import functools
+from transformers.models.qwen2.modeling_qwen2 import Qwen2DecoderLayer
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -51,7 +58,20 @@ class ActorRolloutRefWorker(Worker):
         self.config = config
         self.device_name = get_device_name()
 
+        print("ACTOR INIT!!!!")
+        xr.use_spmd()
+        os.environ["VLLM_XLA_USE_SPMD"] = "0"
         world_size = int(os.environ.get("WORLD_SIZE", 1))
+        # num_devices = xr.global_runtime_device_count()
+        # print("INITTTTTTTTTTTTTTTTTTTTTTTAKLSJDFGHADFJAFD GHAKDH")
+        # mesh_shape = (num_devices, 1)
+        # print("MESH SHAPE")
+        # print(mesh_shape)
+        # device_ids = np.array(range(num_devices))
+        # # To be noted, the mesh must have an axis named 'fsdp', which the weights and activations will be sharded on.
+        # mesh = xs.Mesh(device_ids, mesh_shape, ('fsdp', 'model'))
+        # xs.set_global_mesh(mesh)
+
 
         self.role = role
         assert self.role in ["actor", "rollout", "ref", "actor_rollout", "actor_rollout_ref"]
@@ -146,6 +166,14 @@ class ActorRolloutRefWorker(Worker):
         if self.rank == 0:
             print_model_size(actor_module)
 
+        # auto_wrap_policy = functools.partial(
+        #     transformer_auto_wrap_policy,
+        #     transformer_layer_cls={
+        #         Qwen2DecoderLayer
+        #     },
+        # )
+        # actor_module = FSDPv2(actor_module, auto_wrap_policy=auto_wrap_policy)
+
         if role == "actor" and optim_config is not None:
             from verl.utils.torch_functional import get_constant_schedule_with_warmup, get_cosine_schedule_with_warmup
 
@@ -178,7 +206,6 @@ class ActorRolloutRefWorker(Worker):
         else:
             actor_optimizer = None
             actor_lr_scheduler = None
-
         return actor_module, actor_optimizer, actor_lr_scheduler, actor_model_config
 
     def _build_rollout(self, trust_remote_code=False):
@@ -274,13 +301,13 @@ class ActorRolloutRefWorker(Worker):
         # perform training
         with Timer(name="update_policy", logger=None) as timer:
             metrics = self.actor.update_policy(data=data)
-        delta_time = timer.last
-        global_num_tokens = data.meta_info["global_token_num"]
-        estimated_flops, promised_flops = self.flops_counter.estimate_flops(global_num_tokens, delta_time)
-        metrics["perf/mfu/actor"] = estimated_flops * self.config.actor.ppo_epochs / promised_flops / self.world_size
-        metrics["perf/max_memory_allocated_gb"] = get_torch_device().max_memory_allocated() / (1024**3)
-        metrics["perf/max_memory_reserved_gb"] = get_torch_device().max_memory_reserved() / (1024**3)
-        metrics["perf/cpu_memory_used_gb"] = psutil.virtual_memory().used / (1024**3)
+        # delta_time = timer.last
+        # global_num_tokens = data.meta_info["global_token_num"]
+        # estimated_flops, promised_flops = self.flops_counter.estimate_flops(global_num_tokens, delta_time)
+        # metrics["perf/mfu/actor"] = estimated_flops * self.config.actor.ppo_epochs / promised_flops / self.world_size
+        # metrics["perf/max_memory_allocated_gb"] = get_torch_device().max_memory_allocated() / (1024**3)
+        # metrics["perf/max_memory_reserved_gb"] = get_torch_device().max_memory_reserved() / (1024**3)
+        # metrics["perf/cpu_memory_used_gb"] = psutil.virtual_memory().used / (1024**3)
 
         lr = self.actor_lr_scheduler.get_last_lr()[0]
         metrics["actor/lr"] = lr
@@ -304,13 +331,35 @@ class ActorRolloutRefWorker(Worker):
         }
         prompts.meta_info.update(meta_info)
         timing_generate = {}
-
         with _timer("generate_sequences", timing_generate):
-            params = self.actor_module_fsdp.state_dict()
-            params = convert_weight_keys(params, self.actor_module_fsdp)
-            model = self.rollout.inference_engine.llm_engine.model_executor.driver_worker.model_runner.model
-            loaded_params = model.load_weights(((name, param.to(self.device_name, non_blocking=True).full_tensor() if isinstance(param, DTensor) else param) for name, param in params.items()))
-            logger.info(f"vLLM load weights, loaded_params: {len(loaded_params) if loaded_params else -1}")
+            # peft_model = getattr(self.actor_module_fsdp, "_orig_module", self.actor_module_fsdp)
+
+            # params = peft_model.state_dict()
+            # params = convert_weight_keys(params, peft_model)
+            # model = self.rollout.inference_engine.llm_engine.model_executor.driver_worker.model_runner.model
+
+            # # Create a list to hold the prepared parameters
+            # prepared_params = []
+
+            # # Loop through the parameters and prepare each one
+            # for name, param in params.items():
+            #     if isinstance(param, DTensor):
+            #         # For a DTensor, move it to the device and gather all the shards
+            #         prepared_param = param.to(self.device_name, non_blocking=True).full_tensor()
+            #     else:
+            #         # For a regular tensor, just use it directly
+            #         prepared_param = param
+                
+            #     # Add the name and the prepared parameter to the list
+            #     prepared_params.append((name, prepared_param))
+
+            # # Now, call load_weights on the prepared list
+            # new_prepared_params = []
+            # for prepared_param in prepared_params:
+            #     new_prepared_params.append((prepared_param[0].replace("_orig_module.",""), prepared_param[1]))
+            # loaded_params = model.load_weights(new_prepared_params)
+            # # loaded_params = model.load_weights(((name, param.to(self.device_name, non_blocking=True).full_tensor() if isinstance(param, DTensor) else param) for name, param in params.items()))
+            # logger.info(f"vLLM load weights, loaded_params: {len(loaded_params) if loaded_params else -1}")
             output = self.rollout.generate_sequences(prompts=prompts)
 
         output.meta_info["timing"] = timing_generate

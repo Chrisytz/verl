@@ -58,6 +58,9 @@ from verl.utils.metric import (
 from verl.utils.seqlen_balancing import get_seqlen_balanced_partitions, log_seqlen_unbalance
 from verl.utils.torch_functional import masked_mean
 from verl.utils.tracking import ValidationGenerationsLogger
+import torch_xla.distributed.parallel_loader as pl
+import torch_xla.distributed.spmd as xs
+from torch_xla import runtime as xr
 
 WorkerType = Type[Worker]
 
@@ -311,7 +314,6 @@ class RayPPOTrainer:
         self.config = config
         self.reward_fn = reward_fn
         self.val_reward_fn = val_reward_fn
-
         self.hybrid_engine = config.actor_rollout_ref.hybrid_engine
         assert self.hybrid_engine, "Currently, only support hybrid engine"
 
@@ -500,6 +502,16 @@ class RayPPOTrainer:
             collate_fn=collate_fn,
             sampler=train_sampler,
         )
+
+        # mesh_shape = (4, 1)
+        # device_ids = np.array(range(4))
+        # mesh = xs.Mesh(device_ids, mesh_shape, ('fsdp', 'model'))
+
+        # self.train_dataloader = pl.MpDeviceLoader(
+        #     self.train_dataloader,
+        #     self.device_name,
+        #     # Shard the input's batch dimension along the `fsdp` axis, no sharding along other dimensions
+        #     input_sharding=xs.ShardingSpec(mesh, ('fsdp', None)))
 
         val_batch_size = self.config.data.val_batch_size  # Prefer config value if set
         if val_batch_size is None:
@@ -752,7 +764,12 @@ class RayPPOTrainer:
             wg_kwargs["ray_wait_register_center_timeout"] = self.config.trainer.ray_wait_register_center_timeout
         
         for resource_pool, class_dict in self.resource_pool_to_cls.items():
-            for init_args_cls in class_dict.values():
+            if self.config.trainer.device == "tpu":
+                classes_to_spawn = class_dict.values()
+            else:
+                classes_to_spawn = [create_colocated_worker_cls_fused(class_dict=class_dict)]
+
+            for init_args_cls in classes_to_spawn:
                 wg_dict = self.ray_worker_group_cls(resource_pool=resource_pool, ray_cls_with_init=init_args_cls, device_name=self.device_name, **wg_kwargs)
                 spawn_wg = wg_dict.spawn(prefix_set=class_dict.keys())
                 all_wg.update(spawn_wg)
