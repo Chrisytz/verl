@@ -10,6 +10,7 @@ from typing import Dict, Optional
 from transformers import AutoTokenizer
 from datasets import load_dataset
 from vllm import LLM, SamplingParams
+from verl.utils.tokenizer import set_pad_token_id
 
 # Environment variable setup for distributed VLLM (if applicable)
 os.environ.setdefault("RANK", os.getenv("RANK", "0"))
@@ -26,19 +27,10 @@ PROMPT_QWEN = "qwen"
 METHOD_STRICT = "strict"
 METHOD_FLEXIBLE = "flexible"
 
-def set_tokenizer_padding(tokenizer: AutoTokenizer) -> None:
-    """Sets pad_token_id and pad_token for the tokenizer if they are None."""
-    if tokenizer.pad_token_id is None:
-        tokenizer.pad_token_id = tokenizer.eos_token_id
-        warnings.warn(f"tokenizer.pad_token_id is None. Set to {tokenizer.eos_token_id}", stacklevel=1)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-        warnings.warn(f"tokenizer.pad_token is None. Set to {tokenizer.eos_token}", stacklevel=1)
-
 def load_model_tokenizer() -> AutoTokenizer:
     """Loads and configures the tokenizer."""
     tokenizer = AutoTokenizer.from_pretrained(QWEN_MODEL_NAME, trust_remote_code=False)
-    set_tokenizer_padding(tokenizer)
+    set_pad_token_id(tokenizer)
     return tokenizer
 
 def format_message_to_prompt(prompt_type: str, message: Dict[str, str], few_shot_prompt="") -> str:
