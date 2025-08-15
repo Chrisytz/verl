@@ -981,10 +981,6 @@ class RayPPOTrainer:
                 timing_raw = {}
                 batch: DataProto = DataProto.from_single_dict(batch_dict)
 
-
-                testing = self.actor_wg.compute_log_prob(batch)
-                return
-
                 # pop those keys for generation
                 batch_keys_to_pop = ["input_ids", "attention_mask", "position_ids"]
                 non_tensor_batch_keys_to_pop = ["raw_prompt_ids"]
