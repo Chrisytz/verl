@@ -36,7 +36,7 @@ def run_ppo(config) -> None:
         # NCCL debug level, VLLM logging level, and allow runtime LoRA updating
         # `num_cpus` specifies the number of CPU cores Ray can use, obtained from the configuration
         ray.init(
-            runtime_env={"env_vars": {"TOKENIZERS_PARALLELISM": "true", "NCCL_DEBUG": "WARN", "VLLM_LOGGING_LEVEL": "WARN", "VLLM_ALLOW_RUNTIME_LORA_UPDATING": "true"}},
+            runtime_env={"env_vars": {"TOKENIZERS_PARALLELISM": "true", "NCCL_DEBUG": "WARN", "VLLM_LOGGING_LEVEL": "WARN", "VLLM_ALLOW_RUNTIME_LORA_UPDATING": "true", "RAY_DEBUG":"1"}},
             num_cpus=config.ray_init.num_cpus,
         )
     
@@ -115,7 +115,8 @@ class TaskRunner:
 
         # Map roles to their corresponding remote worker classes.
         role_worker_mapping = {
-            Role.ActorRollout: ray.remote(actor_rollout_cls),
+            Role.Actor: ray.remote(actor_rollout_cls),
+            Role.Rollout: ray.remote(actor_rollout_cls),
             Role.Critic: ray.remote(CriticWorker),
         }
 
@@ -129,8 +130,9 @@ class TaskRunner:
             critic_pool_id: [config.trainer.n_gpus_per_node if config.trainer.device == "cuda" else config.trainer.n_tpus_per_node] * config.trainer.nnodes,
         }
         mapping = {
-            Role.ActorRollout: actor_pool_id,
-            Role.Critic: critic_pool_id,
+            Role.Actor: actor_pool_id,
+            Role.Rollout: critic_pool_id,
+            Role.Critic: actor_pool_id,
         }
 
         # We should adopt a multi-source reward function here:
