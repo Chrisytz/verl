@@ -760,7 +760,6 @@ class RayPPOTrainer:
         if OmegaConf.select(self.config.trainer, "ray_wait_register_center_timeout") is not None:
             wg_kwargs["ray_wait_register_center_timeout"] = self.config.trainer.ray_wait_register_center_timeout
         
-        breakpoint()
         for resource_pool, class_dict in self.resource_pool_to_cls.items():
             if len(class_dict) > 1:
                 # Multiple roles in the same resource pool, fuse them
