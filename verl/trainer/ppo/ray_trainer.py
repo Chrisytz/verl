@@ -999,7 +999,7 @@ class RayPPOTrainer:
                             # Get the latest weights from the actor worker group
                             actor_weights = self.actor_wg.get_state_dict(gen_batch)
                             # Pass the weights to the rollout worker group for generation
-                            gen_batch_output = self.rollout_wg.generate_sequences(gen_batch)
+                            gen_batch_output = self.rollout_wg.generate_sequences(gen_batch, actor_weights)
                         else:
                             self.async_rollout_manager.wake_up()
                             gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch)
