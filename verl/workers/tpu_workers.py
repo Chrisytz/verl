@@ -322,7 +322,7 @@ class ActorRolloutRefWorker(Worker):
         get_torch_device().empty_cache()
         return output
     
-    @register(dispatch_mode=Dispatch.ONE_TO_ALL, execute_mode=Execute.RANK_ZERO)
+    @register()
     def get_state_dict(self):
         return self.actor_module_fsdp.state_dict()
     
@@ -331,24 +331,22 @@ class ActorRolloutRefWorker(Worker):
     def compute_log_prob(self, data: DataProto):
         assert self._is_actor
 
-        print("RUNNING COMPUTE LOG PROBS")
-
         output = data
-        # # Support all hardwares
-        # data = data.to(get_torch_device().current_device())
-        # # we should always recompute old_log_probs when it is HybridEngine
-        # data.meta_info["micro_batch_size"] = self.config.rollout.log_prob_micro_batch_size_per_gpu
-        # data.meta_info["max_token_len"] = self.config.rollout.log_prob_max_token_len_per_gpu
-        # data.meta_info["use_dynamic_bsz"] = self.config.rollout.log_prob_use_dynamic_bsz
-        # data.meta_info["temperature"] = self.config.rollout.temperature
-        # # perform recompute log_prob
-        # output, entropys = self.actor.compute_log_prob(data=data, calculate_entropy=True)
-        # output = DataProto.from_dict(
-        #     tensors={"old_log_probs": output, "entropys": entropys},
-        #     meta_info={"temperature": self.config.rollout.temperature},
-        # )
+        # Support all hardwares
+        data = data.to(get_torch_device().current_device())
+        # we should always recompute old_log_probs when it is HybridEngine
+        data.meta_info["micro_batch_size"] = self.config.rollout.log_prob_micro_batch_size_per_gpu
+        data.meta_info["max_token_len"] = self.config.rollout.log_prob_max_token_len_per_gpu
+        data.meta_info["use_dynamic_bsz"] = self.config.rollout.log_prob_use_dynamic_bsz
+        data.meta_info["temperature"] = self.config.rollout.temperature
+        # perform recompute log_prob
+        output, entropys = self.actor.compute_log_prob(data=data, calculate_entropy=True)
+        output = DataProto.from_dict(
+            tensors={"old_log_probs": output, "entropys": entropys},
+            meta_info={"temperature": self.config.rollout.temperature},
+        )
 
-        # output = output.to("cpu")
+        output = output.to("cpu")
 
         return output
 
