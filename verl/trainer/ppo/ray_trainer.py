@@ -781,12 +781,7 @@ class RayPPOTrainer:
         wg_kwargs = {}  # Setting up kwargs for RayWorkerGroup
         if OmegaConf.select(self.config.trainer, "ray_wait_register_center_timeout") is not None:
             wg_kwargs["ray_wait_register_center_timeout"] = self.config.trainer.ray_wait_register_center_timeout
-
-        breakpoint()
-        if self.config.actor_rollout_ref.actor.strategy == "xla":
-            wg_kwargs["enable_fsdp_xla"] = self.config.actor_rollout_ref.actor.enable_fsdp_xla
-            wg_kwargs["n_tpus"] = self.config.actor_rollout_ref.actor.fsdp_spmd_config.n_tpus
-
+        
         for resource_pool, class_dict in self.resource_pool_to_cls.items():
             if len(class_dict) > 1:
                 # Multiple roles in the same resource pool, fuse them
