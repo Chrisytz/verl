@@ -324,7 +324,6 @@ class ActorRolloutRefWorker(Worker):
     
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def get_state_dict(self, data: DataProto):
-        breakpoint()
         output = DataProto()
         weights = self.actor_module_fsdp.state_dict()
         for k, v in weights.items():
