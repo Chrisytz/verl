@@ -113,9 +113,9 @@ class RayResourcePool(ResourcePool):
         elif device_name == "tpu":
             device_name = "TPU"
 
-        bundle = {"CPU": self.max_colocate_count}
+        bundle = {"CPU": 2}
         if self.use_accelerator:
-            bundle[device_name] = num_accelerators
+            bundle[device_name] = 2
             if self.accelerator_type is not None:
                 bundle[self.accelerator_type] = 1e-4
 
@@ -123,7 +123,7 @@ class RayResourcePool(ResourcePool):
 
         lifetime = "detached" if self.detached else None
 
-        pgs = [placement_group(bundles=bundles, strategy=strategy, name=pg_name_prefix + str(idx), lifetime=lifetime) for idx, bundles in enumerate(pg_scheme)]
+        pgs = [placement_group(bundles=bundles, strategy="SPREAD", name=pg_name_prefix + str(idx), lifetime=lifetime) for idx, bundles in enumerate(pg_scheme)]
 
         ray.get([pg.ready() for pg in pgs])
 

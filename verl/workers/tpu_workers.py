@@ -28,6 +28,7 @@ from omegaconf import DictConfig
 from verl import DataProto
 from verl.single_controller.base import Worker
 from verl.single_controller.base.decorator import Dispatch, register, Execute
+from verl.single_controller.base.decorator import Dispatch, register, Execute
 from verl.utils import hf_processor, hf_tokenizer
 from verl.utils.debug.performance import _timer, reduce_timing
 from verl.utils.device import get_device_name, get_torch_device
@@ -341,7 +342,7 @@ class ActorRolloutRefWorker(Worker):
         return output
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
-    def generate_sequences(self, prompts: DataProto):
+    def generate_sequences(self, prompts: DataProto, actor_weights: dict = None):
         # Support all hardwares
         prompts = prompts.to(get_torch_device().current_device())
 
@@ -355,12 +356,10 @@ class ActorRolloutRefWorker(Worker):
         timing_generate = {}
 
         with _timer("generate_sequences", timing_generate):
-            if self.actor_wg is not None:
-                params = self.actor_wg.get_state_dict()[0]
-            else:
-                params = self.actor_module_fsdp.state_dict()
-                params = convert_weight_keys(params, self.actor_module_fsdp)
-
+            print("ACTOR WEIGHTS IS NONE?")
+            print(actor_weights is None)
+            params = actor_weights if actor_weights is not None else self.actor_module_fsdp.state_dict()
+            params = convert_weight_keys(params, self.actor_module_fsdp)
             model = self.rollout.inference_engine.llm_engine.model_executor.driver_worker.model_runner.model
 
             # Create a list to hold the prepared parameters
@@ -376,31 +375,33 @@ class ActorRolloutRefWorker(Worker):
         get_torch_device().empty_cache()
         return output
     
-    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=True)
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, execute_mode=Execute.RANK_ZERO)
     def get_state_dict(self):
-        assert self._is_actor
-        params = self.actor_module_fsdp.state_dict()
-        params = convert_weight_keys(params, getattr(self.actor_module_fsdp, "_orig_module", self.actor_module_fsdp))
-        return params
+        return self.actor_module_fsdp.state_dict()
+    
     
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def compute_log_prob(self, data: DataProto):
         assert self._is_actor
-        # Support all hardwares
-        data = data.to(get_torch_device().current_device())
-        # we should always recompute old_log_probs when it is HybridEngine
-        data.meta_info["micro_batch_size"] = self.config.rollout.log_prob_micro_batch_size_per_gpu
-        data.meta_info["max_token_len"] = self.config.rollout.log_prob_max_token_len_per_gpu
-        data.meta_info["use_dynamic_bsz"] = self.config.rollout.log_prob_use_dynamic_bsz
-        data.meta_info["temperature"] = self.config.rollout.temperature
-        # perform recompute log_prob
-        output, entropys = self.actor.compute_log_prob(data=data, calculate_entropy=True)
-        output = DataProto.from_dict(
-            tensors={"old_log_probs": output, "entropys": entropys},
-            meta_info={"temperature": self.config.rollout.temperature},
-        )
 
-        output = output.to("cpu")
+        print("RUNNING COMPUTE LOG PROBS")
+
+        output = data
+        # # Support all hardwares
+        # data = data.to(get_torch_device().current_device())
+        # # we should always recompute old_log_probs when it is HybridEngine
+        # data.meta_info["micro_batch_size"] = self.config.rollout.log_prob_micro_batch_size_per_gpu
+        # data.meta_info["max_token_len"] = self.config.rollout.log_prob_max_token_len_per_gpu
+        # data.meta_info["use_dynamic_bsz"] = self.config.rollout.log_prob_use_dynamic_bsz
+        # data.meta_info["temperature"] = self.config.rollout.temperature
+        # # perform recompute log_prob
+        # output, entropys = self.actor.compute_log_prob(data=data, calculate_entropy=True)
+        # output = DataProto.from_dict(
+        #     tensors={"old_log_probs": output, "entropys": entropys},
+        #     meta_info={"temperature": self.config.rollout.temperature},
+        # )
+
+        # output = output.to("cpu")
 
         return output
 
