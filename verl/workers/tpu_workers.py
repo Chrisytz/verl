@@ -292,7 +292,7 @@ class ActorRolloutRefWorker(Worker):
         return output
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
-    def generate_sequences(self, prompts: DataProto):
+    def generate_sequences(self, prompts: DataProto, actor_weights=None):
         # Support all hardwares
         prompts = prompts.to(get_torch_device().current_device())
 
@@ -307,7 +307,8 @@ class ActorRolloutRefWorker(Worker):
 
         with _timer("generate_sequences", timing_generate):
             print("ACTOR WEIGHTS IS NONE?")
-            params = self.actor_module_fsdp.state_dict()
+            print(actor_weights)
+            params = actor_weights if actor_weights is not None else self.actor_module_fsdp.state_dict()
             params = convert_weight_keys(params, self.actor_module_fsdp)
             model = self.rollout.inference_engine.llm_engine.model_executor.driver_worker.model_runner.model
             loaded_params = model.load_weights(((name, param.to(self.device_name, non_blocking=True).full_tensor() if isinstance(param, DTensor) else param) for name, param in params.items()))
@@ -321,11 +322,11 @@ class ActorRolloutRefWorker(Worker):
         get_torch_device().empty_cache()
         return output
     
-    @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def get_state_dict(self, data: DataProto):
         weights = self.actor_module_fsdp.state_dict()
 
-        return data    
+        return weights   
     
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def compute_log_prob(self, data: DataProto):
