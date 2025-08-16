@@ -635,7 +635,7 @@ class RayPPOTrainer:
             # pad to be divisible by dp_size
             test_gen_batch_padded, pad_size = pad_dataproto_to_divisor(test_gen_batch, self.rollout_wg.world_size)
             if not self.async_rollout_mode:
-                test_output_gen_batch_padded = self.rollout_wg.generate_sequences(test_gen_batch_padded)
+                test_output_gen_batch_padded = self.rollout_wg.generate_sequences(test_gen_batch_padded)[0]
             else:
                 self.async_rollout_manager.wake_up()
                 test_output_gen_batch_padded = self.async_rollout_manager.generate_sequences(test_gen_batch_padded)
