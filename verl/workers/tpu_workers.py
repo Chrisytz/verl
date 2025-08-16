@@ -303,7 +303,11 @@ class ActorRolloutRefWorker(Worker):
         with _timer("generate_sequences", timing_generate):
             print("ACTOR WEIGHTS IS NONE?")
             print(actor_weights is not None)
-            params = actor_weights.non_tensor_batch["actor_weights"]
+            if actor_weights is not None:
+                params = actor_weights.non_tensor_batch["actor_weights"]
+            else:
+                params = self.actor_module_fsdp.state_dict()
+                params = convert_weight_keys(params, self.actor_module_fsdp)
             model = self.rollout.inference_engine.llm_engine.model_executor.driver_worker.model_runner.model
             loaded_params = model.load_weights(((name, param.to(self.device_name, non_blocking=True).full_tensor() if isinstance(param, DTensor) else param) for name, param in params.items()))
             logger.info(f"vLLM load weights, loaded_params: {len(loaded_params) if loaded_params else -1}")
