@@ -331,12 +331,12 @@ class ActorRolloutRefWorker(Worker):
         output = DataProto()
         weights = self.actor_module_fsdp.state_dict()
         weights = convert_weight_keys(weights, self.actor_module_fsdp)
-        with open("/workspaces/logging/actor_weights.txt", "w") as file:
-            json.dump(weights, file)
+        with open("actor_weights.txt", "w") as file:
+            file.write(wights)
         for k, v in weights.items():
             weights[k] = v.cpu()
-        with open("/workspaces/logging/actor_weights_cpu.txt", "w") as file:
-            json.dump(weights, file)
+        with open("actor_weights_cpu.txt", "w") as file:
+            file.write(weights)
         output.non_tensor_batch["actor_weights"] = weights
 
         return output   
