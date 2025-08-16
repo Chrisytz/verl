@@ -18,6 +18,7 @@ The main entry point to run the PPO algorithm
 import logging
 import os
 import warnings
+import json
 
 import psutil
 import torch
@@ -330,9 +331,12 @@ class ActorRolloutRefWorker(Worker):
         output = DataProto()
         weights = self.actor_module_fsdp.state_dict()
         weights = convert_weight_keys(weights, self.actor_module_fsdp)
-
+        with open("/workspaces/logging/actor_weights.txt", "w") as file:
+            json.dump(weights, file)
         for k, v in weights.items():
             weights[k] = v.cpu()
+        with open("/workspaces/logging/actor_weights_cpu.txt", "w") as file:
+            json.dump(weights, file)
         output.non_tensor_batch["actor_weights"] = weights
 
         return output   
