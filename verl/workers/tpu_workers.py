@@ -308,8 +308,7 @@ class ActorRolloutRefWorker(Worker):
         with _timer("generate_sequences", timing_generate):
             print("ACTOR WEIGHTS IS NONE?")
             print(actor_weights is not None)
-            params = actor_weights.non_tensor_batch["actor_weights"] if actor_weights is not None else self.actor_module_fsdp.state_dict()
-            params = convert_weight_keys(params, actor_weights.non_tensor_batch["actor"] if actor_weights is not None else self.actor_module_fsdp)
+            params = actor_weights.non_tensor_batch["actor_weights"]
             model = self.rollout.inference_engine.llm_engine.model_executor.driver_worker.model_runner.model
             loaded_params = model.load_weights(((name, param.to(self.device_name, non_blocking=True).full_tensor() if isinstance(param, DTensor) else param) for name, param in params.items()))
             logger.info(f"vLLM load weights, loaded_params: {len(loaded_params) if loaded_params else -1}")
@@ -326,10 +325,11 @@ class ActorRolloutRefWorker(Worker):
     def get_state_dict(self, data: DataProto):
         output = DataProto()
         weights = self.actor_module_fsdp.state_dict()
+        weights = convert_weight_keys(weights, self.actor_module_fsdp)
+
         for k, v in weights.items():
             weights[k] = v.cpu()
         output.non_tensor_batch["actor_weights"] = weights
-        output.non_tensor_batch["actor"] = self.actor_module_fsdp
 
         return output   
     
