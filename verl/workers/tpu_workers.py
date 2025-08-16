@@ -358,7 +358,11 @@ class ActorRolloutRefWorker(Worker):
         with _timer("generate_sequences", timing_generate):
             print("ACTOR WEIGHTS IS NONE?")
             print(actor_weights is not None)
-            params = actor_weights.non_tensor_batch["actor_weights"]
+            if actor_weights is not None:
+                params = actor_weights.non_tensor_batch["actor_weights"]
+            else:
+                params = self.actor_module_fsdp.state_dict()
+                params = convert_weight_keys(params, self.actor_module_fsdp)
             model = self.rollout.inference_engine.llm_engine.model_executor.driver_worker.model_runner.model
 
             # Create a list to hold the prepared parameters
