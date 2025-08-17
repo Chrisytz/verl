@@ -328,10 +328,10 @@ class ActorRolloutRefWorker(Worker):
         weights = convert_weight_keys(weights, self.actor_module_fsdp)
         with open("actor_weights.txt", "a") as file:
             file.write(str(weights))
-        for k, v in weights.items():
-            weights[k] = v.cpu()
-        with open("actor_weights_cpu.txt", "a") as file:
-            file.write(str(weights))
+        # for k, v in weights.items():
+        #     weights[k] = v.cpu()
+        # with open("actor_weights_cpu.txt", "a") as file:
+        #     file.write(str(weights))
         output.non_tensor_batch["actor_weights"] = weights
 
         return output   
