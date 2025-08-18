@@ -56,7 +56,6 @@ class ActorRolloutRefWorker(Worker):
 
     def __init__(self, config: DictConfig, role: str):
         super().__init__()
-        breakpoint()
         self.config = config
         self.device_name = get_device_name()
 
@@ -157,7 +156,6 @@ class ActorRolloutRefWorker(Worker):
         if self.rank == 0:
             print_model_size(actor_module)
         
-        breakpoint()
         if self._is_actor:
             xr.use_spmd()
             num_devices = xr.global_runtime_device_count()
