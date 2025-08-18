@@ -643,7 +643,7 @@ class RayPPOTrainer:
             # pad to be divisible by dp_size
             test_gen_batch_padded, pad_size = pad_dataproto_to_divisor(test_gen_batch, self.rollout_wg.world_size)
             if not self.async_rollout_mode:
-                test_output_gen_batch_padded = self.rollout_wg.generate_sequences(test_gen_batch_padded)[0]
+                test_output_gen_batch_padded = self.rollout_wg.generate_sequences(test_gen_batch_padded)
             else:
                 self.async_rollout_manager.wake_up()
                 test_output_gen_batch_padded = self.async_rollout_manager.generate_sequences(test_gen_batch_padded)
@@ -993,7 +993,7 @@ class RayPPOTrainer:
                             # Get the latest weights from the actor worker group
                             # actor_weights = self.actor_wg.get_state_dict()
                             # Pass the weights to the rollout worker group for generation
-                            gen_batch_output = self.rollout_wg.generate_sequences(gen_batch)[0]
+                            gen_batch_output = self.rollout_wg.generate_sequences(gen_batch)
                         else:
                             self.async_rollout_manager.wake_up()
                             gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch)
