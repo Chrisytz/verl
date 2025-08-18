@@ -791,7 +791,7 @@ class RayPPOTrainer:
         self.actor_wg.init_model()
 
         self.rollout_wg = all_wg["rollout"]
-        self.rollout_wg.init_model()
+        self.rollout_wg.init_model(actor_cls=self.actor_wg)
 
         # create async rollout manager and request scheduler
         self.async_rollout_mode = False
@@ -968,9 +968,9 @@ class RayPPOTrainer:
                     with _timer("gen", timing_raw):
                         if not self.async_rollout_mode:
                             # Get the latest weights from the actor worker group
-                            actor_weights = self.actor_wg.get_state_dict(gen_batch)
+                            # actor_weights = self.actor_wg.get_state_dict()
                             # Pass the weights to the rollout worker group for generation
-                            gen_batch_output = self.rollout_wg.generate_sequences(gen_batch, actor_weights[0])[0]
+                            gen_batch_output = self.rollout_wg.generate_sequences(gen_batch)[0]
                         else:
                             self.async_rollout_manager.wake_up()
                             gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch)
