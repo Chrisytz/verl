@@ -113,9 +113,9 @@ class RayResourcePool(ResourcePool):
         elif device_name == "tpu":
             device_name = "TPU"
 
-        bundle = {"CPU": 2}
+        bundle = {"CPU": 1}
         if self.use_accelerator:
-            bundle[device_name] = 2
+            bundle[device_name] = 4
             if self.accelerator_type is not None:
                 bundle[self.accelerator_type] = 1e-4
 
@@ -220,7 +220,7 @@ class RayClassWithInitArgs(ClassWithInitArgs):
         if use_accelerator and device_name == "npu":
             options["resources"] = {"NPU": num_accelerators}
         if use_accelerator and device_name == "tpu":
-            options["resources"] = {"TPU": num_accelerators}
+            options["resources"] = {"TPU": 4}
 
         if len(self._additional_resource) > 1:
             for k, v in self._additional_resource.items():
