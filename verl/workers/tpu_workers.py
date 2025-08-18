@@ -81,13 +81,7 @@ class ActorRolloutRefWorker(Worker):
                 assert self.config.actor.ppo_mini_batch_size % self.config.actor.ppo_micro_batch_size_per_gpu == 0, f"normalized ppo_mini_batch_size {self.config.actor.ppo_mini_batch_size} should be divisible by ppo_micro_batch_size_per_gpu {self.config.actor.ppo_micro_batch_size_per_gpu}"
                 assert self.config.actor.ppo_mini_batch_size // self.config.actor.ppo_micro_batch_size_per_gpu > 0, f"normalized ppo_mini_batch_size {self.config.actor.ppo_mini_batch_size} should be larger than ppo_micro_batch_size_per_gpu {self.config.actor.ppo_micro_batch_size_per_gpu}"
             
-            xr.use_spmd()
-            num_devices = xr.global_runtime_device_count()
-            mesh_shape = ("MESH SHAPE", mesh_shape)
-            device_ids = np.array(range(num_devices))
-            # To be noted, the mesh must have an axis named 'fsdp', which the weights and activations will be sharded on.
-            mesh = xs.Mesh(device_ids, mesh_shape, ('fsdp', 'model'))
-            xs.set_global_mesh(mesh)
+
 
         # normalize rollout config
         if self._is_rollout and self.config.rollout.log_prob_micro_batch_size is not None:
@@ -165,6 +159,14 @@ class ActorRolloutRefWorker(Worker):
         
         breakpoint()
         if self._is_actor:
+            xr.use_spmd()
+            num_devices = xr.global_runtime_device_count()
+            mesh_shape = (num_devices, 1)
+            device_ids = np.array(range(num_devices))
+            # To be noted, the mesh must have an axis named 'fsdp', which the weights and activations will be sharded on.
+            mesh = xs.Mesh(device_ids, mesh_shape, ('fsdp', 'model'))
+            xs.set_global_mesh(mesh)
+            
             auto_wrap_policy = functools.partial(
                 transformer_auto_wrap_policy,
                 transformer_layer_cls={
