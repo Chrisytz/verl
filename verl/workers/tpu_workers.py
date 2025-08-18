@@ -40,12 +40,37 @@ import numpy as np
 import torch_xla.distributed.spmd as xs
 import torch_xla.runtime as xr
 from torch_xla.experimental.spmd_fully_sharded_data_parallel import SpmdFullyShardedDataParallel as FSDPv2
+from torch_xla.experimental.spmd_fully_sharded_data_parallel import _prepare_spmd_partition_spec
 from torch_xla.distributed.fsdp.wrap import transformer_auto_wrap_policy
 import functools
 from transformers.models.qwen2.modeling_qwen2 import Qwen2DecoderLayer
+from transformers.modeling_outputs import CausalLMOutputWithPast
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+
+def shard_output_with_causal_lm(output, mesh):
+    import torch_xla
+    real_output = None
+    if isinstance(output, torch.Tensor):
+        real_output = output
+    elif isinstance(output, CausalLMOutputWithPast):
+        real_output = output.logits
+    elif isinstance(output, tuple):
+        real_output = output[0] if isinstance(output[0], torch.Tensor) else None
+        warnings.warn(
+            "The output is a tuple, but only the first element is sharded. If this is not intended, please provide your own shard_output callable."
+        )
+    
+    if real_output is None:
+        raise RuntimeError(
+            f"The output type is not supported: {type(output)}. Please provide your own shard_output callable."
+        )
+
+    if not torch_xla._XLAC._get_xla_sharding_spec(real_output):
+        xs.mark_sharding(
+            real_output, mesh,
+            _prepare_spmd_partition_spec(real_output))
 
 
 class ActorRolloutRefWorker(Worker):
@@ -171,7 +196,7 @@ class ActorRolloutRefWorker(Worker):
                     Qwen2DecoderLayer
                 },
             )
-            actor_module = FSDPv2(actor_module, auto_wrap_policy=auto_wrap_policy)
+            actor_module = FSDPv2(actor_module, auto_wrap_policy=auto_wrap_policy, shard_output=shard_output_with_causal_lm)
 
         if role == "actor" and optim_config is not None:
             from verl.utils.torch_functional import get_constant_schedule_with_warmup, get_cosine_schedule_with_warmup
