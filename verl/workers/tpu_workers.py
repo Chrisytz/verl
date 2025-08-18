@@ -199,7 +199,7 @@ class ActorRolloutRefWorker(Worker):
         return rollout
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
-    def init_model(self):
+    def init_model(self, actor_cls=None):
         from verl.workers.actor import DataParallelPPOActor
 
         # This is used to import external_lib into the huggingface systems
@@ -257,6 +257,8 @@ class ActorRolloutRefWorker(Worker):
 
         if self._is_actor:
             self.flops_counter = FlopsCounter(self.actor_model_config)
+        
+        self.actor_wg = actor_cls
 
         #TODO: create a checkpoint manager to allow loading checkpoints for rollout
 
@@ -287,8 +289,8 @@ class ActorRolloutRefWorker(Worker):
 
         return output
 
-    @register(dispatch_mode=Dispatch.ALL_TO_ALL)
-    def generate_sequences(self, prompts: DataProto, actor_weights=None):
+    @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
+    def generate_sequences(self, prompts: DataProto):
         # Support all hardwares
         prompts = prompts.to(get_torch_device().current_device())
 
@@ -302,13 +304,14 @@ class ActorRolloutRefWorker(Worker):
         timing_generate = {}
 
         with _timer("generate_sequences", timing_generate):
-            print("ACTOR WEIGHTS IS NONE?")
-            print(actor_weights is not None)
-            if actor_weights is not None:
-                params = actor_weights.non_tensor_batch["actor_weights"]
+            # print("ACTOR WEIGHTS IS NONE?")
+            # print(actor_weights is not None)
+            # breakpoint()
+            if self.actor_wg is not None:
+                params = self.actor_wg.get_state_dict()[0]
             else:
                 params = self.actor_module_fsdp.state_dict()
-                params = convert_weight_keys(params, self.actor_module_fsdp)
+            params = convert_weight_keys(params, self.actor_module_fsdp)
             model = self.rollout.inference_engine.llm_engine.model_executor.driver_worker.model_runner.model
             loaded_params = model.load_weights(((name, param.to(self.device_name, non_blocking=True).full_tensor() if isinstance(param, DTensor) else param) for name, param in params.items()))
             logger.info(f"vLLM load weights, loaded_params: {len(loaded_params) if loaded_params else -1}")
@@ -321,20 +324,22 @@ class ActorRolloutRefWorker(Worker):
         get_torch_device().empty_cache()
         return output
     
-    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
-    def get_state_dict(self, data: DataProto):
-        output = DataProto()
-        weights = self.actor_module_fsdp.state_dict()
-        weights = convert_weight_keys(weights, self.actor_module_fsdp)
-        with open("actor_weights.txt", "a") as file:
-            file.write(str(weights))
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=True)
+    def get_state_dict(self):
+        assert self._is_actor
+        return self.actor_module_fsdp.state_dict()
+        # output = DataProto()
+        # weights = self.actor_module_fsdp.state_dict()
+        # weights = convert_weight_keys(weights, self.actor_module_fsdp)
+        # with open("/workspaces/actor_weights_multi_tpu.txt", "a") as file:
+        #     file.write(str(weights))
         # for k, v in weights.items():
         #     weights[k] = v.cpu()
-        # with open("actor_weights_cpu.txt", "a") as file:
+        # with open("/workspaces/actor_weights_cpu_multi_tpu.txt", "a") as file:
         #     file.write(str(weights))
-        output.non_tensor_batch["actor_weights"] = weights
+        # output.non_tensor_batch["actor_weights"] = weights
 
-        return output   
+        # return output   
     
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def compute_log_prob(self, data: DataProto):
