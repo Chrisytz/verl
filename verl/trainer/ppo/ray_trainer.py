@@ -813,8 +813,8 @@ class RayPPOTrainer:
             self.actor_wg = all_wg["actor"]
         self.actor_wg.init_model()
 
-        # self.rollout_wg = all_wg["rollout"]
-        # self.rollout_wg.init_model(actor_cls=self.actor_wg)
+        self.rollout_wg = all_wg["rollout"]
+        self.rollout_wg.init_model(actor_cls=self.actor_wg)
 
         # create async rollout manager and request scheduler
         self.async_rollout_mode = False
