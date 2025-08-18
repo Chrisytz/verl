@@ -176,8 +176,10 @@ class DataParallelPPOActor(BasePPOActor):
 
                     # compute entropy
                     if calculate_entropy:
-                        entropy_rmpad = self.compute_entropy_from_logits(logits_rmpad)  # ((total_nnz / sp) + pad)
-                        #TODO: add option for using gradient checkpointing
+                        if not self.config.entropy_checkpointing:
+                            entropy_rmpad = self.compute_entropy_from_logits(logits_rmpad)  # ((total_nnz / sp) + pad)
+                        else:
+                            entropy_rmpad = torch.utils.checkpoint.checkpoint(self.compute_entropy_from_logits, logits_rmpad) 
 
                 # gather log_prob if sp > 1
                 if self.use_ulysses_sp:
@@ -258,10 +260,7 @@ class DataParallelPPOActor(BasePPOActor):
             print(f"WARN: rank {torch.distributed.get_rank()} grad_norm is not finite: {grad_norm}")
             self.actor_optimizer.zero_grad()
         else:
-            if self.device_name == "xla":
-                self.torch_xla.core.xla_model.optimizer_step(self.actor_optimizer, barrier=True)
-            else:
-                self.actor_optimizer.step()
+            self.actor_optimizer.step()
         return grad_norm
 
     @GPUMemoryLogger(role="dp actor", logger=logger)
@@ -315,8 +314,10 @@ class DataParallelPPOActor(BasePPOActor):
             log_probs_lst.append(log_probs)
             if calculate_entropy:
                 entropy_lst.append(entropy)
+            if self.device_name == "xla":
+                self.torch_xla.sync()
+        if self.device_name == "xla":
             self.torch_xla.sync()
-        self.torch_xla.sync()
 
         log_probs = torch.concat(log_probs_lst, dim=0)
         entropys = None
@@ -444,7 +445,8 @@ class DataParallelPPOActor(BasePPOActor):
                         else:
                             loss = policy_loss / self.gradient_accumulation
                         loss.backward()
-                        self.torch_xla.sync()
+                        if self.device_name == "xla":
+                            self.torch_xla.sync()
                     data = {
                         "actor/pg_loss": pg_loss.detach().item(),
                         "actor/pg_clipfrac": pg_clipfrac.detach().item(),
@@ -452,12 +454,15 @@ class DataParallelPPOActor(BasePPOActor):
                         "actor/pg_clipfrac_lower": pg_clipfrac_lower.detach().item(),
                     }
                     append_to_dict(metrics, data)
-                    
+ 
                 grad_norm = self._optimizer_step()
-                self.torch_xla.sync()
+                if self.device_name == "xla":
+                    self.torch_xla.sync()
                 data = {"actor/grad_norm": grad_norm.detach().item()}
                 append_to_dict(metrics, data)
-            self.torch_xla.sync()
+            if self.device_name == "xla":
+                self.torch_xla.sync()
         self.actor_optimizer.zero_grad(set_to_none=True)
-        self.torch_xla.sync()
+        if self.device_name == "xla":
+            self.torch_xla.sync()
         return metrics

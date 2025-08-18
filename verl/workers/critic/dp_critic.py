@@ -20,6 +20,7 @@ import logging
 import os
 
 import torch
+import torch.distributed
 from torch import nn, optim
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 
@@ -146,10 +147,7 @@ class DataParallelPPOCritic(BasePPOCritic):
             print(f"WARN: grad_norm is not finite: {grad_norm}")
             self.critic_optimizer.zero_grad()
         else:
-            if self.device_name == "xla":
-                self.torch_xla.core.xla_model.optimizer_step(self.critic_optimizer, barrier=True)
-            else:
-                self.critic_optimizer.step()
+            self.critic_optimizer.step()
         return grad_norm
 
     @GPUMemoryLogger(role="dp critic", logger=logger)
@@ -180,9 +178,11 @@ class DataParallelPPOCritic(BasePPOCritic):
             with torch.no_grad():
                 values = self._forward_micro_batch(micro_batch)
             values_lst.append(values)
-            self.torch_xla.sync()
+            if self.device_name == "xla":
+                self.torch_xla.sync()
         values = torch.concat(values_lst, dim=0)
-        self.torch_xla.sync()
+        if self.device_name == "xla":
+            self.torch_xla.sync()
 
         if use_dynamic_bsz:
             indices = list(itertools.chain.from_iterable(indices))
@@ -266,7 +266,8 @@ class DataParallelPPOCritic(BasePPOCritic):
                             loss = vf_loss / self.gradient_accumulation
 
                         loss.backward()
-                        self.torch_xla.sync()
+                        if self.device_name == "xla":
+                            self.torch_xla.sync()
 
                     data = {
                         "critic/vf_loss": vf_loss.detach().item(),
@@ -277,10 +278,13 @@ class DataParallelPPOCritic(BasePPOCritic):
                     append_to_dict(metrics, data)
 
                 grad_norm = self._optimizer_step()
-                self.torch_xla.sync()
+                if self.device_name == "xla":
+                    self.torch_xla.sync()
                 data = {"critic/grad_norm": grad_norm.detach().item()}
                 append_to_dict(metrics, data)
-            self.torch_xla.sync()
+            if self.device_name == "xla":
+                self.torch_xla.sync()
         self.critic_optimizer.zero_grad(set_to_none=True)
-        self.torch_xla.sync()
+        if self.device_name == "xla":
+            self.torch_xla.sync()
         return metrics
