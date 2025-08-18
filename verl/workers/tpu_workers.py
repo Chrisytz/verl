@@ -182,9 +182,6 @@ class ActorRolloutRefWorker(Worker):
         return actor_module, actor_optimizer, actor_lr_scheduler, actor_model_config
 
     def _build_rollout(self, trust_remote_code=False):
-
-        infer_tp = self.config.rollout.tensor_model_parallel_size
-        assert self.world_size % infer_tp == 0, f"rollout world_size: {self.world_size} is not divisible by infer_tp: {infer_tp}"
         rollout_name = self.config.rollout.name
         assert rollout_name == "vllm"
 
@@ -192,10 +189,8 @@ class ActorRolloutRefWorker(Worker):
 
         local_path = copy_to_local(self.config.model.path, use_shm=self.config.model.get("use_shm", False))
         if vllm_mode == "spmd":
-            from verl.workers.rollout.vllm_rollout import vLLMAsyncRollout
-
-            vllm_rollout_cls = vLLMRollout if self.config.rollout.mode == "sync" else vLLMAsyncRollout
-            rollout = vllm_rollout_cls(model_path=local_path, config=self.config.rollout, tokenizer=self.tokenizer, model_hf_config=self.actor_model_config, trust_remote_code=trust_remote_code, device_name=self.device_name)
+            assert self.config.rollout.mode == "sync"
+            rollout = vLLMRollout(model_path=local_path, config=self.config.rollout, tokenizer=self.tokenizer, model_hf_config=self.actor_model_config, trust_remote_code=trust_remote_code, device_name=self.device_name)
         else:
             raise NotImplementedError("vllm_mode must be 'spmd' for tpu training")
         
