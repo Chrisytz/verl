@@ -37,16 +37,7 @@ from verl.utils.fs import copy_to_local
 from verl.utils.import_utils import import_external_libs
 from verl.utils.model import convert_weight_keys
 from torch.distributed.tensor import DTensor
-import numpy as np
-import torch_xla.distributed.spmd as xs
 import torch_xla.runtime as xr
-from torch_xla.experimental.spmd_fully_sharded_data_parallel import SpmdFullyShardedDataParallel as FSDPv2
-from torch_xla.experimental.spmd_fully_sharded_data_parallel import _prepare_spmd_partition_spec
-from torch_xla.distributed.fsdp.wrap import transformer_auto_wrap_policy
-import functools
-from transformers.models.qwen2.modeling_qwen2 import Qwen2DecoderLayer
-from transformers.modeling_outputs import CausalLMOutputWithPast
-from transformers.modeling_outputs import TokenClassifierOutput
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -107,6 +98,7 @@ class ActorRolloutRefWorker(Worker):
             if self.config.actor.ppo_micro_batch_size_per_gpu is not None:
                 assert self.config.actor.ppo_mini_batch_size % self.config.actor.ppo_micro_batch_size_per_gpu == 0, f"normalized ppo_mini_batch_size {self.config.actor.ppo_mini_batch_size} should be divisible by ppo_micro_batch_size_per_gpu {self.config.actor.ppo_micro_batch_size_per_gpu}"
                 assert self.config.actor.ppo_mini_batch_size // self.config.actor.ppo_micro_batch_size_per_gpu > 0, f"normalized ppo_mini_batch_size {self.config.actor.ppo_mini_batch_size} should be larger than ppo_micro_batch_size_per_gpu {self.config.actor.ppo_micro_batch_size_per_gpu}"
+            xr.use_spmd()
             
         # normalize rollout config
         if self._is_rollout and self.config.rollout.log_prob_micro_batch_size is not None:
