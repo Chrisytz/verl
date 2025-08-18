@@ -259,7 +259,6 @@ class ActorRolloutRefWorker(Worker):
             self.flops_counter = FlopsCounter(self.actor_model_config)
         
         self.actor_wg = actor_cls
-
         #TODO: create a checkpoint manager to allow loading checkpoints for rollout
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
@@ -304,9 +303,6 @@ class ActorRolloutRefWorker(Worker):
         timing_generate = {}
 
         with _timer("generate_sequences", timing_generate):
-            # print("ACTOR WEIGHTS IS NONE?")
-            # print(actor_weights is not None)
-            # breakpoint()
             if self.actor_wg is not None:
                 params = self.actor_wg.get_state_dict()[0]
             else:
@@ -328,18 +324,6 @@ class ActorRolloutRefWorker(Worker):
     def get_state_dict(self):
         assert self._is_actor
         return self.actor_module_fsdp.state_dict()
-        # output = DataProto()
-        # weights = self.actor_module_fsdp.state_dict()
-        # weights = convert_weight_keys(weights, self.actor_module_fsdp)
-        # with open("/workspaces/actor_weights_multi_tpu.txt", "a") as file:
-        #     file.write(str(weights))
-        # for k, v in weights.items():
-        #     weights[k] = v.cpu()
-        # with open("/workspaces/actor_weights_cpu_multi_tpu.txt", "a") as file:
-        #     file.write(str(weights))
-        # output.non_tensor_batch["actor_weights"] = weights
-
-        # return output   
     
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def compute_log_prob(self, data: DataProto):
