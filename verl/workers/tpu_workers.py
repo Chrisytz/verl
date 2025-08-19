@@ -45,17 +45,20 @@ from torch_xla.distributed.fsdp.wrap import transformer_auto_wrap_policy
 import functools
 from transformers.models.qwen2.modeling_qwen2 import Qwen2DecoderLayer
 from transformers.modeling_outputs import CausalLMOutputWithPast
+from transformers.modeling_outputs import TokenClassifierOutput
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
-def shard_output_with_causal_lm(output, mesh):
+def custom_shard_output_impl(output, mesh):
     import torch_xla
     real_output = None
     if isinstance(output, torch.Tensor):
         real_output = output
     elif isinstance(output, CausalLMOutputWithPast):
         real_output = output.logits
+    elif isinstance(output, TokenClassifierOutput):
+          real_output = output.logits
     elif isinstance(output, tuple):
         real_output = output[0] if isinstance(output[0], torch.Tensor) else None
         warnings.warn(
@@ -196,7 +199,7 @@ class ActorRolloutRefWorker(Worker):
                     Qwen2DecoderLayer
                 },
             )
-            actor_module = FSDPv2(actor_module, auto_wrap_policy=auto_wrap_policy, shard_output=shard_output_with_causal_lm)
+            actor_module = FSDPv2(actor_module, auto_wrap_policy=auto_wrap_policy, shard_output=custom_shard_output_impl)
 
         if role == "actor" and optim_config is not None:
             from verl.utils.torch_functional import get_constant_schedule_with_warmup, get_cosine_schedule_with_warmup
@@ -322,13 +325,13 @@ class ActorRolloutRefWorker(Worker):
         # perform training
         with Timer(name="update_policy", logger=None) as timer:
             metrics = self.actor.update_policy(data=data)
-        delta_time = timer.last
-        global_num_tokens = data.meta_info["global_token_num"]
-        estimated_flops, promised_flops = self.flops_counter.estimate_flops(global_num_tokens, delta_time)
-        metrics["perf/mfu/actor"] = estimated_flops * self.config.actor.ppo_epochs / promised_flops / self.world_size
-        metrics["perf/max_memory_allocated_gb"] = get_torch_device().max_memory_allocated() / (1024**3)
-        metrics["perf/max_memory_reserved_gb"] = get_torch_device().max_memory_reserved() / (1024**3)
-        metrics["perf/cpu_memory_used_gb"] = psutil.virtual_memory().used / (1024**3)
+        # delta_time = timer.last
+        # global_num_tokens = data.meta_info["global_token_num"]
+        # estimated_flops, promised_flops = self.flops_counter.estimate_flops(global_num_tokens, delta_time)
+        # metrics["perf/mfu/actor"] = estimated_flops * self.config.actor.ppo_epochs / promised_flops / self.world_size
+        # metrics["perf/max_memory_allocated_gb"] = get_torch_device().max_memory_allocated() / (1024**3)
+        # metrics["perf/max_memory_reserved_gb"] = get_torch_device().max_memory_reserved() / (1024**3)
+        # metrics["perf/cpu_memory_used_gb"] = psutil.virtual_memory().used / (1024**3)
 
         lr = self.actor_lr_scheduler.get_last_lr()[0]
         metrics["actor/lr"] = lr
@@ -359,8 +362,6 @@ class ActorRolloutRefWorker(Worker):
             else:
                 params = self.actor_module_fsdp.state_dict()
                 params = convert_weight_keys(params, getattr(self.actor_module_fsdp, "_orig_module", self.actor_module_fsdp))
-
-            params_rollout = self.actor_module_fsdp.state_dict()
 
             model = self.rollout.inference_engine.llm_engine.model_executor.driver_worker.model_runner.model
 
@@ -528,6 +529,14 @@ class CriticWorker(Worker):
         if self.rank == 0:
             print_model_size(critic_module)
 
+        auto_wrap_policy = functools.partial(
+            transformer_auto_wrap_policy,
+            transformer_layer_cls={
+                Qwen2DecoderLayer
+            },
+        )
+        critic_module = FSDPv2(critic_module, auto_wrap_policy=auto_wrap_policy, shard_output=custom_shard_output_impl)
+
         self.critic_model_config = critic_model_config
 
         critic_optimizer = optim.AdamW(
@@ -560,6 +569,13 @@ class CriticWorker(Worker):
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def init_model(self):
+        xr.use_spmd()
+        num_devices = xr.global_runtime_device_count()
+        mesh_shape = (num_devices, 1)
+        device_ids = np.array(range(num_devices))
+        # To be noted, the mesh must have an axis named 'fsdp', which the weights and activations will be sharded on.
+        mesh = xs.Mesh(device_ids, mesh_shape, ('fsdp', 'model'))
+        xs.set_global_mesh(mesh)
         # This is used to import external_lib into the huggingface systems
         import_external_libs(self.config.model.get("external_lib", None))
 
