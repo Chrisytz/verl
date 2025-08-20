@@ -21,8 +21,6 @@ import os
 
 import torch
 import torch.distributed
-from flash_attn.bert_padding import (index_first_axis, pad_input, rearrange,
-                                     unpad_input)
 from torch import nn, optim
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 
@@ -46,6 +44,11 @@ if is_cuda_available:
 elif is_npu_available:
     from transformers.integrations.npu_flash_attention import (
         index_first_axis, pad_input, rearrange, unpad_input)
+else:
+    try:
+        import torch_xla
+    except (ImportError, ModuleNotFoundError):
+        print("Warning: torch_xla is not installed. Ignore this warning if not running on TPU.")
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -176,7 +179,11 @@ class DataParallelPPOCritic(BasePPOCritic):
             with torch.no_grad():
                 values = self._forward_micro_batch(micro_batch)
             values_lst.append(values)
+            if self.device_name == "xla":
+                torch_xla.sync()
         values = torch.concat(values_lst, dim=0)
+        if self.device_name == "xla":
+            torch_xla.sync()
 
         if use_dynamic_bsz:
             indices = list(itertools.chain.from_iterable(indices))
@@ -225,7 +232,7 @@ class DataParallelPPOCritic(BasePPOCritic):
                     micro_batches = mini_batch.split(self.config.ppo_micro_batch_size_per_gpu)
                     self.gradient_accumulation = self.config.ppo_mini_batch_size // self.config.ppo_micro_batch_size_per_gpu
 
-                self.critic_optimizer.zero_grad()
+                self.critic_optimizer.zero_grad(set_to_none=True)
 
                 for data in micro_batches:
                     # Support all devices
@@ -240,26 +247,28 @@ class DataParallelPPOCritic(BasePPOCritic):
                     response_length = responses.size(1)
 
                     response_mask = attention_mask[:, -response_length:]
+                    with torch.enable_grad():
+                        vpreds = self._forward_micro_batch(data)
 
-                    vpreds = self._forward_micro_batch(data)
+                        # assert not torch.any(torch.isnan(vpreds)).item()
 
-                    # assert not torch.any(torch.isnan(vpreds)).item()
+                        vf_loss, vf_clipfrac = core_algos.compute_value_loss(
+                            vpreds=vpreds,
+                            values=values,
+                            returns=returns,
+                            response_mask=response_mask,
+                            cliprange_value=self.config.cliprange_value,
+                            loss_agg_mode=self.config.loss_agg_mode,
+                        )
+                        if self.config.use_dynamic_bsz:
+                            # relative to the dynamic bsz
+                            loss = vf_loss * (len(data) / self.config.ppo_mini_batch_size)
+                        else:
+                            loss = vf_loss / self.gradient_accumulation
 
-                    vf_loss, vf_clipfrac = core_algos.compute_value_loss(
-                        vpreds=vpreds,
-                        values=values,
-                        returns=returns,
-                        response_mask=response_mask,
-                        cliprange_value=self.config.cliprange_value,
-                        loss_agg_mode=self.config.loss_agg_mode,
-                    )
-                    if self.config.use_dynamic_bsz:
-                        # relative to the dynamic bsz
-                        loss = vf_loss * (len(data) / self.config.ppo_mini_batch_size)
-                    else:
-                        loss = vf_loss / self.gradient_accumulation
-
-                    loss.backward()
+                        loss.backward()
+                        if self.device_name == "xla":
+                            torch_xla.sync()
 
                     data = {
                         "critic/vf_loss": vf_loss.detach().item(),
@@ -270,7 +279,13 @@ class DataParallelPPOCritic(BasePPOCritic):
                     append_to_dict(metrics, data)
 
                 grad_norm = self._optimizer_step()
+                if self.device_name == "xla":
+                    torch_xla.sync()
                 data = {"critic/grad_norm": grad_norm.detach().item()}
                 append_to_dict(metrics, data)
-        self.critic_optimizer.zero_grad()
+            if self.device_name == "xla":
+                torch_xla.sync()
+        self.critic_optimizer.zero_grad(set_to_none=True)
+        if self.device_name == "xla":
+            torch_xla.sync()
         return metrics
