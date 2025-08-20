@@ -47,7 +47,7 @@ elif is_npu_available:
 else:
     try:
         import torch_xla
-    except:
+    except (ImportError, ModuleNotFoundError):
         print("Warning: torch_xla is not installed. Ignore this warning if not running on TPU.")
 
 logger = logging.getLogger(__file__)
