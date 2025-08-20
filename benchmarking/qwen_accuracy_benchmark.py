@@ -20,16 +20,15 @@ os.environ.setdefault("MASTER_ADDR", os.getenv("MASTER_ADDR", "localhost"))
 os.environ.setdefault("MASTER_PORT", os.getenv("MASTER_PORT", "8269"))
 
 # Constants
-QWEN_MODEL_NAME = "Qwen/Qwen2.5-0.5B-Instruct"
 GSM8K_DATASET = "openai/gsm8k"
 PROMPT_VERL = "verl"
 PROMPT_QWEN = "qwen"
 METHOD_STRICT = "strict"
 METHOD_FLEXIBLE = "flexible"
 
-def load_model_tokenizer() -> AutoTokenizer:
+def load_model_tokenizer(model) -> AutoTokenizer:
     """Loads and configures the tokenizer."""
-    tokenizer = AutoTokenizer.from_pretrained(QWEN_MODEL_NAME, trust_remote_code=False)
+    tokenizer = AutoTokenizer.from_pretrained(model, trust_remote_code=False)
     set_pad_token_id(tokenizer)
     return tokenizer
 
@@ -121,13 +120,21 @@ def main():
         default=PROMPT_VERL,
     )
     parser.add_argument(
-        "-m",
+        "-e",
         "--extract-solution-method",
         type=str,
         choices=[METHOD_STRICT, METHOD_FLEXIBLE],
         help=f"Method to extract numerical answer from response. Either '{METHOD_STRICT}' or '{METHOD_FLEXIBLE}'.",
         default=METHOD_STRICT,
     )
+    parser.add_argument(
+        "-m",
+        "--model",
+        type=str,
+        help="Path of the model",
+        default="Qwen/Qwen2.5-0.5B-Instruct"
+    )
+    
     parser.add_argument(
         "-f",
         "--file-path",
@@ -142,11 +149,11 @@ def main():
     if args.file_path:
         few_shot_prompt = open(args.file_path).read()
     
-    tokenizer = load_model_tokenizer()
+    tokenizer = load_model_tokenizer(args.model)
     ds = load_dataset(GSM8K_DATASET, "main", split="test")
 
     llm = LLM(
-        model="Qwen/Qwen2.5-0.5B-Instruct",
+        model=args.model,
         enable_sleep_mode=False,
         tensor_parallel_size=1,
         distributed_executor_backend="external_launcher",
