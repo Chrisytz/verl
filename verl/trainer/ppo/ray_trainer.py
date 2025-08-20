@@ -1115,14 +1115,14 @@ class RayPPOTrainer:
                             )
 
                     # validate
-                    # if self.val_reward_fn is not None and self.config.trainer.test_freq > 0 and (is_last_step or self.global_steps % self.config.trainer.test_freq == 0):
-                    with _timer("testing", timing_raw):
-                        val_metrics: dict = self._validate()
-                        if is_last_step:
-                            last_val_metrics = val_metrics
+                    if self.val_reward_fn is not None and self.config.trainer.test_freq > 0 and (is_last_step or self.global_steps % self.config.trainer.test_freq == 0):
+                        with _timer("testing", timing_raw):
+                            val_metrics: dict = self._validate()
+                            if is_last_step:
+                                last_val_metrics = val_metrics
 
-                        self.actor_rollout_wg.save_checkpoint(self.global_steps)
-                    metrics.update(val_metrics)
+                            self.actor_rollout_wg.save_checkpoint(self.global_steps)
+                        metrics.update(val_metrics)
 
                 # training metrics
                 metrics.update(
