@@ -36,6 +36,7 @@ from verl.utils.fs import copy_to_local
 from verl.utils.import_utils import import_external_libs
 from verl.utils.model import convert_weight_keys
 from torch.distributed.tensor import DTensor
+import torch_xla.runtime as xr
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -216,6 +217,7 @@ class ActorRolloutRefWorker(Worker):
             if self._is_actor:
                 optim_config = self.config.actor.optim
                 fsdp_config = self.config.actor.fsdp_config
+                xr.use_spmd()
             else:
                 optim_config = None
                 fsdp_config = OmegaConf.create()
@@ -271,13 +273,6 @@ class ActorRolloutRefWorker(Worker):
         # perform training
         with Timer(name="update_policy", logger=None) as timer:
             metrics = self.actor.update_policy(data=data)
-        delta_time = timer.last
-        global_num_tokens = data.meta_info["global_token_num"]
-        estimated_flops, promised_flops = self.flops_counter.estimate_flops(global_num_tokens, delta_time)
-        metrics["perf/mfu/actor"] = estimated_flops * self.config.actor.ppo_epochs / promised_flops / self.world_size
-        metrics["perf/max_memory_allocated_gb"] = get_torch_device().max_memory_allocated() / (1024**3)
-        metrics["perf/max_memory_reserved_gb"] = get_torch_device().max_memory_reserved() / (1024**3)
-        metrics["perf/cpu_memory_used_gb"] = psutil.virtual_memory().used / (1024**3)
 
         lr = self.actor_lr_scheduler.get_last_lr()[0]
         metrics["actor/lr"] = lr
@@ -483,6 +478,7 @@ class CriticWorker(Worker):
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def init_model(self):
+        xr.use_spmd()
         # This is used to import external_lib into the huggingface systems
         import_external_libs(self.config.model.get("external_lib", None))
 

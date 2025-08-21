@@ -26,7 +26,6 @@ from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 
 from verl import DataProto
 from verl.trainer.ppo import core_algos
-from verl.utils.debug import GPUMemoryLogger
 from verl.utils.device import (get_device_name, get_torch_device,
                                is_cuda_available, is_npu_available)
 from verl.utils.fsdp_utils import FSDPModule, fsdp2_clip_grad_norm_
@@ -151,7 +150,6 @@ class DataParallelPPOCritic(BasePPOCritic):
             self.critic_optimizer.step()
         return grad_norm
 
-    @GPUMemoryLogger(role="dp critic", logger=logger)
     def compute_values(self, data: DataProto) -> torch.Tensor:
         self.critic_module.eval()
         micro_batch_size = data.meta_info["micro_batch_size"]
@@ -198,7 +196,6 @@ class DataParallelPPOCritic(BasePPOCritic):
         values = values * response_mask # Only action tokens have values
         return values
 
-    @GPUMemoryLogger(role="dp critic", logger=logger)
     def update_critic(self, data: DataProto):
         # make sure we are in training mode
         self.critic_module.train()
