@@ -1121,8 +1121,12 @@ class RayPPOTrainer:
                             if is_last_step:
                                 last_val_metrics = val_metrics
 
-                            self.actor_rollout_wg.save_checkpoint(self.global_steps)
                         metrics.update(val_metrics)
+                    
+                    # save checkpoint
+                    if self.config.trainer.save_freq > 0 and (is_last_step or self.global_steps % self.config.trainer.save_freq == 0):
+                        with _timer("save_checkpoint", timing_raw):
+                            self._save_checkpoint()
 
                 # training metrics
                 metrics.update(

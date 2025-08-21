@@ -360,8 +360,12 @@ class ActorRolloutRefWorker(Worker):
         return output
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
-    def save_checkpoint(self, global_step=0):
-        xm.save(self.actor_module_fsdp.state_dict(), f"/workspaces/checkpoints/model_{global_step}")
+    def save_checkpoint(self, local_path, remote_path=None, global_step=0, max_ckpt_to_keep=None):
+        breakpoint()
+        local_dir = os.path.dirname(local_path)
+        if not os.path.isdir(local_dir):
+            os.makedirs(local_dir, exist_ok=True)
+        xm.save(self.actor_module_fsdp.state_dict(), local_path)
 
 
 class CriticWorker(Worker):
@@ -526,4 +530,8 @@ class CriticWorker(Worker):
 
         output = output.to("cpu")
         return output
+    
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def save_checkpoint(self, local_path, remote_path=None, global_step=0, max_ckpt_to_keep=None):
+        pass
 
