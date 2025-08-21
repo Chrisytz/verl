@@ -18,6 +18,7 @@ The main entry point to run the PPO algorithm
 import logging
 import os
 import warnings
+import json
 
 import psutil
 import torch
@@ -26,7 +27,7 @@ from omegaconf import DictConfig
 
 from verl import DataProto
 from verl.single_controller.base import Worker
-from verl.single_controller.base.decorator import Dispatch, register
+from verl.single_controller.base.decorator import Dispatch, register, Execute
 from verl.utils import hf_processor, hf_tokenizer
 from verl.utils.debug.performance import _timer, reduce_timing
 from verl.utils.device import get_device_name, get_torch_device
@@ -198,7 +199,7 @@ class ActorRolloutRefWorker(Worker):
         return rollout
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
-    def init_model(self):
+    def init_model(self, actor_cls=None):
         from verl.workers.actor import DataParallelPPOActor
 
         # This is used to import external_lib into the huggingface systems
@@ -256,7 +257,8 @@ class ActorRolloutRefWorker(Worker):
 
         if self._is_actor:
             self.flops_counter = FlopsCounter(self.actor_model_config)
-
+        
+        self.actor_wg = actor_cls
         #TODO: create a checkpoint manager to allow loading checkpoints for rollout
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
@@ -301,7 +303,10 @@ class ActorRolloutRefWorker(Worker):
         timing_generate = {}
 
         with _timer("generate_sequences", timing_generate):
-            params = self.actor_module_fsdp.state_dict()
+            if self.actor_wg is not None:
+                params = self.actor_wg.get_state_dict()[0]
+            else:
+                params = self.actor_module_fsdp.state_dict()
             params = convert_weight_keys(params, self.actor_module_fsdp)
             model = self.rollout.inference_engine.llm_engine.model_executor.driver_worker.model_runner.model
             loaded_params = model.load_weights(((name, param.to(self.device_name, non_blocking=True).full_tensor() if isinstance(param, DTensor) else param) for name, param in params.items()))
@@ -314,11 +319,17 @@ class ActorRolloutRefWorker(Worker):
         # clear kv cache
         get_torch_device().empty_cache()
         return output
-
+    
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=True)
+    def get_state_dict(self):
+        assert self._is_actor
+        return self.actor_module_fsdp.state_dict()
+    
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def compute_log_prob(self, data: DataProto):
         assert self._is_actor
 
+        output = data
         # Support all hardwares
         data = data.to(get_torch_device().current_device())
         # we should always recompute old_log_probs when it is HybridEngine
@@ -522,4 +533,3 @@ class CriticWorker(Worker):
 
         output = output.to("cpu")
         return output
-
