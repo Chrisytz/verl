@@ -35,6 +35,7 @@ from verl.utils.fs import copy_to_local
 from verl.utils.import_utils import import_external_libs
 from verl.utils.model import convert_weight_keys
 from torch.distributed.tensor import DTensor
+import torch_xla.core.xla_model as xm
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -358,6 +359,13 @@ class ActorRolloutRefWorker(Worker):
 
         return output
 
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def save_checkpoint(self, local_path, remote_path=None, global_step=0, max_ckpt_to_keep=None):
+        breakpoint()
+        local_dir = os.path.dirname(local_path)
+        if not os.path.isdir(local_dir):
+            os.makedirs(local_dir, exist_ok=True)
+        xm.save(self.actor_module_fsdp.state_dict(), local_path)
 
 
 class CriticWorker(Worker):
@@ -522,4 +530,8 @@ class CriticWorker(Worker):
 
         output = output.to("cpu")
         return output
+    
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def save_checkpoint(self, local_path, remote_path=None, global_step=0, max_ckpt_to_keep=None):
+        pass
 
