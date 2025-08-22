@@ -147,7 +147,10 @@ class DataParallelPPOCritic(BasePPOCritic):
             print(f"WARN: grad_norm is not finite: {grad_norm}")
             self.critic_optimizer.zero_grad()
         else:
-            self.critic_optimizer.step()
+            if self.device_name == "xla":
+                self.torch_xla.core.xla_model.optimizer_step(self.critic_optimizer, barrier=True)
+            else:
+                self.critic_optimizer.step()
         return grad_norm
 
     def compute_values(self, data: DataProto) -> torch.Tensor:

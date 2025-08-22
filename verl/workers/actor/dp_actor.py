@@ -175,10 +175,8 @@ class DataParallelPPOActor(BasePPOActor):
 
                     # compute entropy
                     if calculate_entropy:
-                        if not self.config.entropy_checkpointing:
-                            entropy_rmpad = self.compute_entropy_from_logits(logits_rmpad)  # ((total_nnz / sp) + pad)
-                        else:
-                            entropy_rmpad = torch.utils.checkpoint.checkpoint(self.compute_entropy_from_logits, logits_rmpad) 
+                        entropy_rmpad = self.compute_entropy_from_logits(logits_rmpad)  # ((total_nnz / sp) + pad)
+                        #TODO: add option for using gradient checkpointing
 
                 # gather log_prob if sp > 1
                 if self.use_ulysses_sp:
@@ -259,7 +257,10 @@ class DataParallelPPOActor(BasePPOActor):
             print(f"WARN: rank {torch.distributed.get_rank()} grad_norm is not finite: {grad_norm}")
             self.actor_optimizer.zero_grad()
         else:
-            self.actor_optimizer.step()
+            if self.device_name == "xla":
+                self.torch_xla.core.xla_model.optimizer_step(self.actor_optimizer, barrier=True)
+            else:
+                self.actor_optimizer.step()
         return grad_norm
 
     def compute_log_prob(self, data: DataProto, calculate_entropy=False) -> torch.Tensor:
