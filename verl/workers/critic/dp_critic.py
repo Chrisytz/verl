@@ -148,7 +148,7 @@ class DataParallelPPOCritic(BasePPOCritic):
             self.critic_optimizer.zero_grad()
         else:
             if self.device_name == "xla":
-                self.torch_xla.core.xla_model.optimizer_step(self.critic_optimizer, barrier=True)
+                torch_xla.core.xla_model.optimizer_step(self.critic_optimizer, barrier=True)
             else:
                 self.critic_optimizer.step()
         return grad_norm

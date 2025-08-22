@@ -258,7 +258,7 @@ class DataParallelPPOActor(BasePPOActor):
             self.actor_optimizer.zero_grad()
         else:
             if self.device_name == "xla":
-                self.torch_xla.core.xla_model.optimizer_step(self.actor_optimizer, barrier=True)
+                torch_xla.core.xla_model.optimizer_step(self.actor_optimizer, barrier=True)
             else:
                 self.actor_optimizer.step()
         return grad_norm
