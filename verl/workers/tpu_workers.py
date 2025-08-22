@@ -237,6 +237,9 @@ class ActorRolloutRefWorker(Worker):
         return actor_module, actor_optimizer, actor_lr_scheduler, actor_model_config
 
     def _build_rollout(self, trust_remote_code=False):
+
+        infer_tp = self.config.rollout.tensor_model_parallel_size
+        assert self.world_size % infer_tp == 0, f"rollout world_size: {self.world_size} is not divisible by infer_tp: {infer_tp}"
         rollout_name = self.config.rollout.name
         assert rollout_name == "vllm"
 
@@ -244,8 +247,10 @@ class ActorRolloutRefWorker(Worker):
 
         local_path = copy_to_local(self.config.model.path, use_shm=self.config.model.get("use_shm", False))
         if vllm_mode == "spmd":
-            assert self.config.rollout.mode == "sync"
-            rollout = vLLMRollout(model_path=local_path, config=self.config.rollout, tokenizer=self.tokenizer, model_hf_config=self.actor_model_config, trust_remote_code=trust_remote_code, device_name=self.device_name)
+            from verl.workers.rollout.vllm_rollout import vLLMAsyncRollout
+
+            vllm_rollout_cls = vLLMRollout if self.config.rollout.mode == "sync" else vLLMAsyncRollout
+            rollout = vllm_rollout_cls(model_path=local_path, config=self.config.rollout, tokenizer=self.tokenizer, model_hf_config=self.actor_model_config, trust_remote_code=trust_remote_code, device_name=self.device_name)
         else:
             raise NotImplementedError("vllm_mode must be 'spmd' for tpu training")
         
@@ -325,6 +330,13 @@ class ActorRolloutRefWorker(Worker):
         # perform training
         with Timer(name="update_policy", logger=None) as timer:
             metrics = self.actor.update_policy(data=data)
+        # delta_time = timer.last
+        # global_num_tokens = data.meta_info["global_token_num"]
+        # estimated_flops, promised_flops = self.flops_counter.estimate_flops(global_num_tokens, delta_time)
+        # metrics["perf/mfu/actor"] = estimated_flops * self.config.actor.ppo_epochs / promised_flops / self.world_size
+        # metrics["perf/max_memory_allocated_gb"] = get_torch_device().max_memory_allocated() / (1024**3)
+        # metrics["perf/max_memory_reserved_gb"] = get_torch_device().max_memory_reserved() / (1024**3)
+        # metrics["perf/cpu_memory_used_gb"] = psutil.virtual_memory().used / (1024**3)
 
         lr = self.actor_lr_scheduler.get_last_lr()[0]
         metrics["actor/lr"] = lr
@@ -392,8 +404,10 @@ class ActorRolloutRefWorker(Worker):
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=True)
     def get_state_dict(self):
         assert self._is_actor
+        self.actor_module_fsdp.to("cpu")
         params = self.actor_module_fsdp.state_dict()
         params = convert_weight_keys(params, getattr(self.actor_module_fsdp, "_orig_module", self.actor_module_fsdp))
+        self.actor_module_fsdp.to('xla')
         return params
     
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)

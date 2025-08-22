@@ -20,12 +20,12 @@ import logging
 import os
 
 import torch
-import torch.distributed
 from torch import nn, optim
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 
 from verl import DataProto
 from verl.trainer.ppo import core_algos
+from verl.utils.debug import GPUMemoryLogger
 from verl.utils.device import (get_device_name, get_torch_device,
                                is_cuda_available, is_npu_available)
 from verl.utils.fsdp_utils import FSDPModule, fsdp2_clip_grad_norm_
@@ -43,11 +43,6 @@ if is_cuda_available:
 elif is_npu_available:
     from transformers.integrations.npu_flash_attention import (
         index_first_axis, pad_input, rearrange, unpad_input)
-else:
-    try:
-        import torch_xla
-    except (ImportError, ModuleNotFoundError):
-        print("Warning: torch_xla is not installed. Ignore this warning if not running on TPU.")
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -63,6 +58,10 @@ class DataParallelPPOCritic(BasePPOCritic):
 
         self.ulysses_sequence_parallel_size = self.config.get("ulysses_sequence_parallel_size", 1)
         self.device_name = get_device_name()
+
+        if self.device_name == "xla":
+            import torch_xla
+            self.torch_xla = torch_xla
 
     def _forward_micro_batch(self, micro_batch):
         response_length = micro_batch["responses"].size(-1)
@@ -148,11 +147,12 @@ class DataParallelPPOCritic(BasePPOCritic):
             self.critic_optimizer.zero_grad()
         else:
             if self.device_name == "xla":
-                torch_xla.core.xla_model.optimizer_step(self.critic_optimizer, barrier=True)
+                self.torch_xla.core.xla_model.optimizer_step(self.critic_optimizer, barrier=True)
             else:
                 self.critic_optimizer.step()
         return grad_norm
 
+    # @GPUMemoryLogger(role="dp critic", logger=logger)
     def compute_values(self, data: DataProto) -> torch.Tensor:
         self.critic_module.eval()
         micro_batch_size = data.meta_info["micro_batch_size"]
@@ -180,11 +180,9 @@ class DataParallelPPOCritic(BasePPOCritic):
             with torch.no_grad():
                 values = self._forward_micro_batch(micro_batch)
             values_lst.append(values)
-            if self.device_name == "xla":
-                torch_xla.sync()
+            self.torch_xla.sync()
         values = torch.concat(values_lst, dim=0)
-        if self.device_name == "xla":
-            torch_xla.sync()
+        self.torch_xla.sync()
 
         if use_dynamic_bsz:
             indices = list(itertools.chain.from_iterable(indices))
@@ -199,6 +197,7 @@ class DataParallelPPOCritic(BasePPOCritic):
         values = values * response_mask # Only action tokens have values
         return values
 
+    # @GPUMemoryLogger(role="dp critic", logger=logger)
     def update_critic(self, data: DataProto):
         # make sure we are in training mode
         self.critic_module.train()
@@ -267,8 +266,7 @@ class DataParallelPPOCritic(BasePPOCritic):
                             loss = vf_loss / self.gradient_accumulation
 
                         loss.backward()
-                        if self.device_name == "xla":
-                            torch_xla.sync()
+                        self.torch_xla.sync()
 
                     data = {
                         "critic/vf_loss": vf_loss.detach().item(),
@@ -279,13 +277,10 @@ class DataParallelPPOCritic(BasePPOCritic):
                     append_to_dict(metrics, data)
 
                 grad_norm = self._optimizer_step()
-                if self.device_name == "xla":
-                    torch_xla.sync()
+                self.torch_xla.sync()
                 data = {"critic/grad_norm": grad_norm.detach().item()}
                 append_to_dict(metrics, data)
-            if self.device_name == "xla":
-                torch_xla.sync()
+            self.torch_xla.sync()
         self.critic_optimizer.zero_grad(set_to_none=True)
-        if self.device_name == "xla":
-            torch_xla.sync()
+        self.torch_xla.sync()
         return metrics

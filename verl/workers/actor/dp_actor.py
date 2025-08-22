@@ -29,6 +29,7 @@ from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 import verl.utils.torch_functional as verl_F
 from verl import DataProto
 from verl.trainer.ppo.core_algos import agg_loss, compute_policy_loss, kl_penalty
+from verl.utils.debug import GPUMemoryLogger
 from verl.utils.device import get_device_name, get_torch_device, is_cuda_available, is_npu_available
 from verl.utils.fsdp_utils import FSDPModule, fsdp2_clip_grad_norm_
 from verl.utils.py_functional import append_to_dict
@@ -41,11 +42,7 @@ if is_cuda_available:
     from flash_attn.bert_padding import index_first_axis, pad_input, rearrange, unpad_input
 elif is_npu_available:
     from transformers.integrations.npu_flash_attention import index_first_axis, pad_input, rearrange, unpad_input
-else:
-    try:
-        import torch_xla
-    except (ImportError, ModuleNotFoundError):
-        print("Warning: torch_xla is not installed. Ignore this warning if not running on TPU.")
+
 
 __all__ = ["DataParallelPPOActor"]
 
@@ -60,6 +57,10 @@ class DataParallelPPOActor(BasePPOActor):
         self.actor_module = actor_module
         self.actor_optimizer = actor_optimizer
         self.device_name = get_device_name()
+
+        if self.device_name == "xla":
+            import torch_xla
+            self.torch_xla = torch_xla
 
         self.use_remove_padding = self.config.get("use_remove_padding", False)
         if self.device_name != "xla" and torch.distributed.get_rank() == 0:
@@ -258,11 +259,12 @@ class DataParallelPPOActor(BasePPOActor):
             self.actor_optimizer.zero_grad()
         else:
             if self.device_name == "xla":
-                torch_xla.core.xla_model.optimizer_step(self.actor_optimizer, barrier=True)
+                self.torch_xla.core.xla_model.optimizer_step(self.actor_optimizer, barrier=True)
             else:
                 self.actor_optimizer.step()
         return grad_norm
 
+    # @GPUMemoryLogger(role="dp actor", logger=logger)
     def compute_log_prob(self, data: DataProto, calculate_entropy=False) -> torch.Tensor:
         """Compute the log probability of the responses given input_ids, attention_mask and position_ids
 
@@ -313,10 +315,8 @@ class DataParallelPPOActor(BasePPOActor):
             log_probs_lst.append(log_probs)
             if calculate_entropy:
                 entropy_lst.append(entropy)
-            if self.device_name == "xla":
-                torch_xla.sync()
-        if self.device_name == "xla":
-            torch_xla.sync()
+            self.torch_xla.sync()
+        self.torch_xla.sync()
 
         log_probs = torch.concat(log_probs_lst, dim=0)
         entropys = None
@@ -332,6 +332,7 @@ class DataParallelPPOActor(BasePPOActor):
 
         return log_probs, entropys
 
+    # @GPUMemoryLogger(role="dp actor", logger=logger)
     def update_policy(self, data: DataProto):
         # make sure we are in training mode
         self.actor_module.train()
@@ -443,8 +444,7 @@ class DataParallelPPOActor(BasePPOActor):
                         else:
                             loss = policy_loss / self.gradient_accumulation
                         loss.backward()
-                        if self.device_name == "xla":
-                            torch_xla.sync()
+                        self.torch_xla.sync()
                     data = {
                         "actor/pg_loss": pg_loss.detach().item(),
                         "actor/pg_clipfrac": pg_clipfrac.detach().item(),
@@ -452,15 +452,12 @@ class DataParallelPPOActor(BasePPOActor):
                         "actor/pg_clipfrac_lower": pg_clipfrac_lower.detach().item(),
                     }
                     append_to_dict(metrics, data)
- 
+                    
                 grad_norm = self._optimizer_step()
-                if self.device_name == "xla":
-                    torch_xla.sync()
+                self.torch_xla.sync()
                 data = {"actor/grad_norm": grad_norm.detach().item()}
                 append_to_dict(metrics, data)
-            if self.device_name == "xla":
-                torch_xla.sync()
+            self.torch_xla.sync()
         self.actor_optimizer.zero_grad(set_to_none=True)
-        if self.device_name == "xla":
-            torch_xla.sync()
+        self.torch_xla.sync()
         return metrics
