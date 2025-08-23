@@ -42,6 +42,7 @@ import torch_xla.runtime as xr
 from torch_xla.experimental.spmd_fully_sharded_data_parallel import SpmdFullyShardedDataParallel as FSDPv2
 from torch_xla.experimental.spmd_fully_sharded_data_parallel import _prepare_spmd_partition_spec
 from torch_xla.distributed.fsdp.wrap import transformer_auto_wrap_policy
+import torch_xla.core.xla_model as xm
 import functools
 from transformers.models.qwen2.modeling_qwen2 import Qwen2DecoderLayer
 from transformers.modeling_outputs import CausalLMOutputWithPast
@@ -378,6 +379,13 @@ class ActorRolloutRefWorker(Worker):
             for prepared_param in prepared_params:
                 new_prepared_params.append((prepared_param[0].replace("_orig_module.",""), prepared_param[1]))
             loaded_params = model.load_weights(new_prepared_params)
+
+            if "global_step" in prompts.meta_info:
+                step = prompts.meta_info["global_step"]
+                if step % 10 == 0:
+                    xm.save(model.state_dict(), f'/workspaces/xm_checkpoint/model_{step}.pth') 
+                    torch.save(model.state_dict(), f'/workspaces/torch_checkpoint/model_{step}.pth') 
+ 
             # loaded_params = model.load_weights(((name, param.to(self.device_name, non_blocking=True).full_tensor() if isinstance(param, DTensor) else param) for name, param in params.items()))
             logger.info(f"vLLM load weights, loaded_params: {len(loaded_params) if loaded_params else -1}")
             output = self.rollout.generate_sequences(prompts=prompts)
