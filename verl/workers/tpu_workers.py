@@ -53,27 +53,21 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 def custom_shard_output_impl(output, mesh):
     import torch_xla
     real_output = None
-    if isinstance(output, torch.Tensor):
-        real_output = output
-    elif isinstance(output, CausalLMOutputWithPast):
+    if isinstance(output, CausalLMOutputWithPast):
         real_output = output.logits
     elif isinstance(output, TokenClassifierOutput):
           real_output = output.logits
-    elif isinstance(output, tuple):
-        real_output = output[0] if isinstance(output[0], torch.Tensor) else None
-        warnings.warn(
-            "The output is a tuple, but only the first element is sharded. If this is not intended, please provide your own shard_output callable."
-        )
-    
+   
     if real_output is None:
         raise RuntimeError(
             f"The output type is not supported: {type(output)}. Please provide your own shard_output callable."
         )
 
+    print("prepare spmd partition spec", _prepare_spmd_partition_spec(real_output))
+
     if not torch_xla._XLAC._get_xla_sharding_spec(real_output):
         xs.mark_sharding(
-            real_output, mesh,
-            _prepare_spmd_partition_spec(real_output))
+            real_output, mesh, ("fdsp", None, None))
 
 
 class ActorRolloutRefWorker(Worker):
@@ -319,12 +313,12 @@ class ActorRolloutRefWorker(Worker):
     def update_actor(self, data: DataProto):
         # Support all hardwares
         data = data.to(get_torch_device().current_device())  # data will to device with each micro batch on actor.update_policy
-
+        step = data.meta_info["step"]
         assert self._is_actor
 
         # perform training
         with Timer(name="update_policy", logger=None) as timer:
-            metrics = self.actor.update_policy(data=data)
+            metrics = self.actor.update_policy(data=data, step=step)
         # delta_time = timer.last
         # global_num_tokens = data.meta_info["global_token_num"]
         # estimated_flops, promised_flops = self.flops_counter.estimate_flops(global_num_tokens, delta_time)
@@ -364,6 +358,15 @@ class ActorRolloutRefWorker(Worker):
                 params = convert_weight_keys(params, getattr(self.actor_module_fsdp, "_orig_module", self.actor_module_fsdp))
 
             model = self.rollout.inference_engine.llm_engine.model_executor.driver_worker.model_runner.model
+
+            import json
+            with torch.no_grad():
+                sum_dict = {}
+                for name, param in model.named_parameters():
+                    sum_dict[name] = param.sum().item()
+
+                with open(f"/workspaces/llm_parameters/parameter_values_{prompts.meta_info["step"]}.json", "w") as file:
+                    file.write(json.dumps(sum_dict, indent=4))
 
             # Create a list to hold the prepared parameters
             prepared_params = []
