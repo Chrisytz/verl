@@ -352,7 +352,7 @@ class ActorRolloutRefWorker(Worker):
 
         with _timer("generate_sequences", timing_generate):
             if self.actor_wg is not None:
-                params = self.actor_wg.get_state_dict()[0]
+                params = self.actor_wg.get_state_dict(prompts.meta_info["global_step"])[0]
             else:
                 params = self.actor_module_fsdp.state_dict()
                 params = convert_weight_keys(params, getattr(self.actor_module_fsdp, "_orig_module", self.actor_module_fsdp))
@@ -380,12 +380,6 @@ class ActorRolloutRefWorker(Worker):
                 new_prepared_params.append((prepared_param[0].replace("_orig_module.",""), prepared_param[1]))
             loaded_params = model.load_weights(new_prepared_params)
 
-            if "global_step" in prompts.meta_info:
-                step = prompts.meta_info["global_step"]
-                if step % 10 == 0:
-                    xm.save(model.state_dict(), f'/workspaces/xm_checkpoint/model_{step}.pth') 
-                    torch.save(model.state_dict(), f'/workspaces/torch_checkpoint/model_{step}.pth') 
- 
             # loaded_params = model.load_weights(((name, param.to(self.device_name, non_blocking=True).full_tensor() if isinstance(param, DTensor) else param) for name, param in params.items()))
             logger.info(f"vLLM load weights, loaded_params: {len(loaded_params) if loaded_params else -1}")
             output = self.rollout.generate_sequences(prompts=prompts)
@@ -398,9 +392,15 @@ class ActorRolloutRefWorker(Worker):
         return output
     
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=True)
-    def get_state_dict(self):
+    def get_state_dict(self, step):
         assert self._is_actor
+        xm.save(self.actor_module_fsdp.state_dict(), f'/workspaces/xm_checkpoint/on_tpu/model_{step}.pth')
+        torch.save(self.actor_module_fsdp.state_dict(), f'/workspaces/torch_checkpoint/on_tpu/model_{step}.pth')
+
         self.actor_module_fsdp.to("cpu")
+        xm.save(self.actor_module_fsdp.state_dict(), f'/workspaces/xm_checkpoint/on_cpu/model_{step}.pth')
+        torch.save(self.actor_module_fsdp.state_dict(), f'/workspaces/torch_checkpoint/on_cpu/model_{step}.pth')
+
         params = self.actor_module_fsdp.state_dict()
         params = convert_weight_keys(params, getattr(self.actor_module_fsdp, "_orig_module", self.actor_module_fsdp))
         self.actor_module_fsdp.to('xla')
