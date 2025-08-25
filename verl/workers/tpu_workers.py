@@ -53,10 +53,17 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 def custom_shard_output_impl(output, mesh):
     import torch_xla
     real_output = None
-    if isinstance(output, CausalLMOutputWithPast):
+    if isinstance(output, torch.Tensor):
+        real_output = output
+    elif isinstance(output, CausalLMOutputWithPast):
         real_output = output.logits
     elif isinstance(output, TokenClassifierOutput):
           real_output = output.logits
+    elif isinstance(output, tuple):
+        real_output = output[0] if isinstance(output[0], torch.Tensor) else None
+        warnings.warn(
+            f"The output is a tuple, but only the first element is sharded. If this is not intended, please provide your own shard_output callable. {len(output)}    {real_output.shape}"
+        )
    
     if real_output is None:
         raise RuntimeError(
