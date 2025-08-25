@@ -432,10 +432,8 @@ class ActorRolloutRefWorker(Worker):
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=True)
     def get_state_dict(self):
         assert self._is_actor
-        self.actor_module_fsdp.to("cpu")
         params = self.actor_module_fsdp.state_dict()
         params = convert_weight_keys(params, getattr(self.actor_module_fsdp, "_orig_module", self.actor_module_fsdp))
-        self.actor_module_fsdp.to('xla')
         return params
     
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
