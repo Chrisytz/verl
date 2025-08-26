@@ -264,6 +264,9 @@ class ActorRolloutRefWorker(Worker):
     def _build_rollout(self, trust_remote_code=False):
 
         infer_tp = self.config.rollout.tensor_model_parallel_size
+        # assert self.world_size % infer_tp == 0, f"rollout world_size: {self.world_size} is not divisible by infer_tp: {infer_tp}"
+
+        infer_tp = self.config.rollout.tensor_model_parallel_size
         assert self.world_size % infer_tp == 0, f"rollout world_size: {self.world_size} is not divisible by infer_tp: {infer_tp}"
         rollout_name = self.config.rollout.name
         assert rollout_name == "vllm"
