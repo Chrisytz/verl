@@ -345,23 +345,9 @@ class DataParallelPPOActor(BasePPOActor):
 
         return log_probs, entropys
     
-    def get_param_sum(self, step):
-        # Find a parameter to track
-        import json
-        with torch.no_grad():
-            sum_dict = {}
-            for name, param in self.actor_module.named_parameters():
-                sum_dict[name] = param.sum().item()
-
-            with open(f"/workspaces/parameters/parameter_values_{step}.sjon", "w") as file:
-                file.write(json.dumps(sum_dict, indent=4))
-
-            return sum_dict
-
     # @GPUMemoryLogger(role="dp actor", logger=logger)
-    def update_policy(self, data: DataProto, step):
+    def update_policy(self, data: DataProto):
         # make sure we are in training mode
-        self.get_param_sum(step)
         self.actor_module.train()
 
         temperature = data.meta_info["temperature"]  # temperature must be in the data.meta_info to avoid silent error
@@ -407,7 +393,6 @@ class DataParallelPPOActor(BasePPOActor):
 
                 self.actor_optimizer.zero_grad(set_to_none=True)
 
-                print("ACTOR LENGTH MICROBATCHES", len(micro_batches))
                 for data in micro_batches:
                     # Support all hardwares
                     if isinstance(data, DataProto):
