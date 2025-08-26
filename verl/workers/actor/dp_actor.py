@@ -45,8 +45,10 @@ elif is_npu_available:
 else:
     try:
         import torch_xla
+        import torch_xla.distributed.spmd as xs
     except (ImportError, ModuleNotFoundError):
         print("Warning: torch_xla is not installed. Ignore this warning if not running on TPU.")
+
 
 __all__ = ["DataParallelPPOActor"]
 
@@ -300,9 +302,10 @@ class DataParallelPPOActor(BasePPOActor):
         select_keys = ["responses", "input_ids", "attention_mask", "position_ids"]
         batch = data.select(batch_keys=select_keys).batch
 
-        if self.config.enable_fsdp_xla:
-            shard_input_data(batch.values())
-
+        for tensor in batch.values():
+            if not self.torch_xla._XLAC._get_xla_sharding_spec(tensor):
+                partition_spec = tuple("fsdp" if i == 0 else None for i in tensor.ndim)
+                xs.mark_sharding(tensor, xs.get_global_mesh(), partition_spec)
         has_multi_modal_inputs = "multi_modal_inputs" in data.non_tensor_batch.keys()
 
         if has_multi_modal_inputs:
@@ -360,8 +363,10 @@ class DataParallelPPOActor(BasePPOActor):
             select_keys.append("ref_log_prob")
         batch = data.select(batch_keys=select_keys).batch
 
-        if self.config.enable_fsdp_xla:
-            shard_input_data(batch.values())
+        for tensor in batch.values():
+            if not self.torch_xla._XLAC._get_xla_sharding_spec(tensor):
+                partition_spec = tuple("fsdp" if i == 0 else None for i in tensor.ndim)
+                xs.mark_sharding(tensor, xs.get_global_mesh(), partition_spec)
 
         has_multi_modal_inputs = "multi_modal_inputs" in data.non_tensor_batch.keys()
 
