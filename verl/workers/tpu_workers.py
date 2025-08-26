@@ -74,7 +74,7 @@ def custom_shard_output_impl(output, mesh):
 
     if not torch_xla._XLAC._get_xla_sharding_spec(real_output):
         xs.mark_sharding(
-            real_output, mesh, ("fdsp", None, None))
+            real_output, mesh, ("fsdp", None, None))
 
 
 class ActorRolloutRefWorker(Worker):
