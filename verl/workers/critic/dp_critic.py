@@ -175,7 +175,7 @@ class DataParallelPPOCritic(BasePPOCritic):
         batch = data.select(batch_keys=select_keys).batch
         for tensor in batch.values():
             if not self.torch_xla._XLAC._get_xla_sharding_spec(tensor):
-                partition_spec = tuple("fsdp" if i == 0 else None for i in tensor.ndim)
+                partition_spec = tuple("fsdp" if i == 0 else None for i in range(tensor.ndim))
                 xs.mark_sharding(tensor, xs.get_global_mesh(), partition_spec)
 
         use_dynamic_bsz = data.meta_info["use_dynamic_bsz"]
@@ -229,7 +229,7 @@ class DataParallelPPOCritic(BasePPOCritic):
         batch = data.select(batch_keys=select_keys).batch
         for tensor in batch.values():
             if not self.torch_xla._XLAC._get_xla_sharding_spec(tensor):
-                partition_spec = tuple("fsdp" if i == 0 else None for i in tensor.ndim)
+                partition_spec = tuple("fsdp" if i == 0 else None for i in range(tensor.ndim))
                 xs.mark_sharding(tensor, xs.get_global_mesh(), partition_spec)
 
 
