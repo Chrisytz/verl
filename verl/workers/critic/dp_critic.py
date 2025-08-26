@@ -50,6 +50,8 @@ else:
     except (ImportError, ModuleNotFoundError):
         print("Warning: torch_xla is not installed. Ignore this warning if not running on TPU.")
 
+import torch_xla.distributed.spmd as xs
+
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
@@ -157,6 +159,11 @@ class DataParallelPPOCritic(BasePPOCritic):
         micro_batch_size = data.meta_info["micro_batch_size"]
         select_keys = ["responses", "input_ids", "attention_mask", "position_ids"]
         batch = data.select(batch_keys=select_keys).batch
+        for tensor in batch.values():
+            if not self.torch_xla._XLAC._get_xla_sharding_spec(tensor):
+                partition_spec = tuple("fsdp" if i == 0 else None for i in tensor.ndim)
+                xs.mark_sharding(tensor, xs.get_global_mesh(), partition_spec)
+
         use_dynamic_bsz = data.meta_info["use_dynamic_bsz"]
         has_multi_modal_inputs = "multi_modal_inputs" in data.non_tensor_batch.keys()
 
@@ -206,6 +213,12 @@ class DataParallelPPOCritic(BasePPOCritic):
 
         select_keys = ["input_ids", "responses", "attention_mask", "position_ids", "values", "returns"]
         batch = data.select(batch_keys=select_keys).batch
+        for tensor in batch.values():
+            if not self.torch_xla._XLAC._get_xla_sharding_spec(tensor):
+                partition_spec = tuple("fsdp" if i == 0 else None for i in tensor.ndim)
+                xs.mark_sharding(tensor, xs.get_global_mesh(), partition_spec)
+
+
         has_multi_modal_inputs = "multi_modal_inputs" in data.non_tensor_batch.keys()
 
         # Split to make minibatch iterator for updating the actor

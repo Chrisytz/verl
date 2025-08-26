@@ -291,6 +291,11 @@ class DataParallelPPOActor(BasePPOActor):
 
         select_keys = ["responses", "input_ids", "attention_mask", "position_ids"]
         batch = data.select(batch_keys=select_keys).batch
+
+        for tensor in batch.values():
+            if not self.torch_xla._XLAC._get_xla_sharding_spec(tensor):
+                partition_spec = tuple("fsdp" if i == 0 else None for i in tensor.ndim)
+                xs.mark_sharding(tensor, xs.get_global_mesh(), partition_spec)
         has_multi_modal_inputs = "multi_modal_inputs" in data.non_tensor_batch.keys()
 
         if has_multi_modal_inputs:
@@ -347,6 +352,12 @@ class DataParallelPPOActor(BasePPOActor):
         if self.config.use_kl_loss:
             select_keys.append("ref_log_prob")
         batch = data.select(batch_keys=select_keys).batch
+
+        for tensor in batch.values():
+            if not self.torch_xla._XLAC._get_xla_sharding_spec(tensor):
+                partition_spec = tuple("fsdp" if i == 0 else None for i in tensor.ndim)
+                xs.mark_sharding(tensor, xs.get_global_mesh(), partition_spec)
+
         has_multi_modal_inputs = "multi_modal_inputs" in data.non_tensor_batch.keys()
 
         # Split to make minibatch iterator for updating the actor
