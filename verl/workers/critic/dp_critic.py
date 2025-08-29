@@ -71,13 +71,13 @@ class DataParallelPPOCritic(BasePPOCritic):
             import torch_xla
             self.torch_xla = torch_xla
 
-        self.compute_values = conditional_gpu_logger(
-            strategy=self.config.strategy, role="dp critic", logger=logger
-        )(self.compute_values)
+        # self.compute_values = conditional_gpu_logger(
+        #     strategy=self.config.strategy, role="dp critic", logger=logger
+        # )(self.compute_values)
         
-        self.update_critic = conditional_gpu_logger(
-            strategy=self.config.strategy, role="dp critic", logger=logger
-        )(self.update_critic)
+        # self.update_critic = conditional_gpu_logger(
+        #     strategy=self.config.strategy, role="dp critic", logger=logger
+        # )(self.update_critic)
 
     def _forward_micro_batch(self, micro_batch):
         response_length = micro_batch["responses"].size(-1)

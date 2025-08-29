@@ -92,7 +92,7 @@ data:
 actor_rollout_ref:
 
   # Whether it's a hybrid engine, currently only supports hybrid engine
-  hybrid_engine: true
+  hybrid_engine: false
 
   # common configs for the model
   model:
@@ -150,7 +150,7 @@ actor_rollout_ref:
     strategy: xla
 
     # Whether to enable fsdp mode on TPU
-    enable_fsdp_xla: False
+    enable_fsdp_xla: True
     
     # Split each sample into sub-batches of this size for PPO
     ppo_mini_batch_size: 256
