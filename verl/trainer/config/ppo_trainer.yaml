@@ -284,8 +284,6 @@ actor_rollout_ref:
     # configs for FSDP via SPMD in PyTorch/XLA
     fsdp_spmd_config:
 
-      # # Have actor and critic share the same resource pool
-      # colocate_actor_critic: True
 
       n_tpus: 4
 
