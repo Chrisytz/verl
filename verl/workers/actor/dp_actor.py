@@ -29,13 +29,13 @@ from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 import verl.utils.torch_functional as verl_F
 from verl import DataProto
 from verl.trainer.ppo.core_algos import agg_loss, compute_policy_loss, kl_penalty
-from verl.utils.debug import GPUMemoryLogger
 from verl.utils.device import get_device_name, get_torch_device, is_cuda_available, is_npu_available
 from verl.utils.fsdp_utils import FSDPModule, fsdp2_clip_grad_norm_
 from verl.utils.py_functional import append_to_dict
 from verl.utils.seqlen_balancing import get_reverse_idx, rearrange_micro_batches
 from verl.utils.torch_functional import logprobs_from_logits
 from verl.utils.ulysses import gather_outpus_and_unpad, ulysses_pad, ulysses_pad_and_slice_inputs
+from verl.utils.tpu import shard_input_data, conditional_gpu_logger
 from verl.workers.actor import BasePPOActor
 
 if is_cuda_available:
@@ -263,7 +263,7 @@ class DataParallelPPOActor(BasePPOActor):
             self.actor_optimizer.step()
         return grad_norm
 
-    # @GPUMemoryLogger(role="dp actor", logger=logger)
+    @conditional_gpu_logger(condition=self.config.strategy, role="dp actor", logger=logger)
     def compute_log_prob(self, data: DataProto, calculate_entropy=False) -> torch.Tensor:
         """Compute the log probability of the responses given input_ids, attention_mask and position_ids
 
@@ -292,10 +292,9 @@ class DataParallelPPOActor(BasePPOActor):
         select_keys = ["responses", "input_ids", "attention_mask", "position_ids"]
         batch = data.select(batch_keys=select_keys).batch
 
-        for tensor in batch.values():
-            if not self.torch_xla._XLAC._get_xla_sharding_spec(tensor):
-                partition_spec = tuple("fsdp" if i == 0 else None for i in range(tensor.ndim))
-                xs.mark_sharding(tensor, xs.get_global_mesh(), partition_spec)
+        if self.config.enable_fsdp_xla:
+            shard_input_data(batch.values())
+
         has_multi_modal_inputs = "multi_modal_inputs" in data.non_tensor_batch.keys()
 
         if has_multi_modal_inputs:
@@ -338,7 +337,7 @@ class DataParallelPPOActor(BasePPOActor):
 
         return log_probs, entropys
     
-    # @GPUMemoryLogger(role="dp actor", logger=logger)
+    @conditional_gpu_logger(condition=self.config.strategy, role="dp actor", logger=logger)
     def update_policy(self, data: DataProto):
         # make sure we are in training mode
         self.actor_module.train()
@@ -353,10 +352,8 @@ class DataParallelPPOActor(BasePPOActor):
             select_keys.append("ref_log_prob")
         batch = data.select(batch_keys=select_keys).batch
 
-        for tensor in batch.values():
-            if not self.torch_xla._XLAC._get_xla_sharding_spec(tensor):
-                partition_spec = tuple("fsdp" if i == 0 else None for i in range(tensor.ndim))
-                xs.mark_sharding(tensor, xs.get_global_mesh(), partition_spec)
+        if self.config.enable_fsdp_xla:
+            shard_input_data(batch.values())
 
         has_multi_modal_inputs = "multi_modal_inputs" in data.non_tensor_batch.keys()
 

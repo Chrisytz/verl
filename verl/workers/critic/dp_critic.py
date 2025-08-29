@@ -26,7 +26,6 @@ from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 
 from verl import DataProto
 from verl.trainer.ppo import core_algos
-from verl.utils.debug import GPUMemoryLogger
 from verl.utils.device import (get_device_name, get_torch_device,
                                is_cuda_available, is_npu_available)
 from verl.utils.fsdp_utils import FSDPModule, fsdp2_clip_grad_norm_
@@ -36,6 +35,7 @@ from verl.utils.seqlen_balancing import (get_reverse_idx,
 from verl.utils.torch_functional import masked_mean
 from verl.utils.ulysses import (gather_outpus_and_unpad,
                                 ulysses_pad_and_slice_inputs)
+from verl.utils.tpu import shard_input_data, conditional_gpu_logger
 from verl.workers.critic import BasePPOCritic
 
 if is_cuda_available:
@@ -153,16 +153,15 @@ class DataParallelPPOCritic(BasePPOCritic):
             self.critic_optimizer.step()
         return grad_norm
 
-    # @GPUMemoryLogger(role="dp critic", logger=logger)
+    @conditional_gpu_logger(condition=self.config.strategy, role="dp critic", logger=logger)
     def compute_values(self, data: DataProto) -> torch.Tensor:
         self.critic_module.eval()
         micro_batch_size = data.meta_info["micro_batch_size"]
         select_keys = ["responses", "input_ids", "attention_mask", "position_ids"]
         batch = data.select(batch_keys=select_keys).batch
-        for tensor in batch.values():
-            if not self.torch_xla._XLAC._get_xla_sharding_spec(tensor):
-                partition_spec = tuple("fsdp" if i == 0 else None for i in range(tensor.ndim))
-                xs.mark_sharding(tensor, xs.get_global_mesh(), partition_spec)
+
+        if self.config.enable_fsdp_xla:
+            shard_input_data(batch.values())
 
         use_dynamic_bsz = data.meta_info["use_dynamic_bsz"]
         has_multi_modal_inputs = "multi_modal_inputs" in data.non_tensor_batch.keys()
@@ -205,7 +204,7 @@ class DataParallelPPOCritic(BasePPOCritic):
         values = values * response_mask # Only action tokens have values
         return values
 
-    # @GPUMemoryLogger(role="dp critic", logger=logger)
+    @conditional_gpu_logger(condition=self.config.strategy, role="dp critic", logger=logger)
     def update_critic(self, data: DataProto):
         # make sure we are in training mode
         self.critic_module.train()
@@ -213,11 +212,9 @@ class DataParallelPPOCritic(BasePPOCritic):
 
         select_keys = ["input_ids", "responses", "attention_mask", "position_ids", "values", "returns"]
         batch = data.select(batch_keys=select_keys).batch
-        for tensor in batch.values():
-            if not self.torch_xla._XLAC._get_xla_sharding_spec(tensor):
-                partition_spec = tuple("fsdp" if i == 0 else None for i in range(tensor.ndim))
-                xs.mark_sharding(tensor, xs.get_global_mesh(), partition_spec)
-
+        
+        if self.config.enable_fsdp_xla:
+            shard_input_data(batch.values())
 
         has_multi_modal_inputs = "multi_modal_inputs" in data.non_tensor_batch.keys()
 

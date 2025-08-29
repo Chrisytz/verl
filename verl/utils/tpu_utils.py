@@ -1,4 +1,5 @@
 import torch
+from verl.utils.debug import GPUMemoryLogger
 
 class Tpu:
     """This is to simulate torch.tpu backend. 
@@ -50,3 +51,20 @@ class Tpu:
 
     def manual_seed(self, seed):
         self.torch_xla.manual_seed(seed)
+
+def shard_input_data(batch_values):
+    import torch_xla
+    import torch_xla.distributed.spmd as xs
+    for tensor in batch_values:
+        if not torch_xla._XLAC._get_xla_sharding_spec(tensor):
+            partition_spec = tuple("fsdp" if i == 0 else None for i in range(tensor.ndim))
+            xs.mark_sharding(tensor, xs.get_global_mesh(), partition_spec)
+
+def conditional_gpu_logger(strategy, role, logger):
+    """Returns GPUMemoryLogger decorator if not running on TPU."""
+    if strategy != "xla":
+        return GPUMemoryLogger(role=role, logger=logger)
+    else:
+        def no_op_decorator(func):
+            return func
+        return no_op_decorator
