@@ -1,5 +1,4 @@
 import torch
-from verl.utils.debug import GPUMemoryLogger
 
 class Tpu:
     """This is to simulate torch.tpu backend. 
@@ -62,6 +61,7 @@ def shard_input_data(batch_values):
 
 def conditional_gpu_logger(strategy, role, logger):
     """Returns GPUMemoryLogger decorator if not running on TPU."""
+    from verl.utils.debug import GPUMemoryLogger
     if strategy != "xla":
         return GPUMemoryLogger(role=role, logger=logger)
     else:
