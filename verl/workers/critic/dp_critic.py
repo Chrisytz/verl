@@ -35,7 +35,7 @@ from verl.utils.seqlen_balancing import (get_reverse_idx,
 from verl.utils.torch_functional import masked_mean
 from verl.utils.ulysses import (gather_outpus_and_unpad,
                                 ulysses_pad_and_slice_inputs)
-from verl.utils.tpu import shard_input_data, conditional_gpu_logger
+from verl.utils.tpu_utils import shard_input_data, conditional_gpu_logger
 from verl.workers.critic import BasePPOCritic
 
 if is_cuda_available:
@@ -66,6 +66,18 @@ class DataParallelPPOCritic(BasePPOCritic):
 
         self.ulysses_sequence_parallel_size = self.config.get("ulysses_sequence_parallel_size", 1)
         self.device_name = get_device_name()
+
+        if self.device_name == "xla":
+            import torch_xla
+            self.torch_xla = torch_xla
+
+        self.compute_values = conditional_gpu_logger(
+            strategy=self.config.strategy, role="dp critic", logger=logger
+        )(self.compute_values)
+        
+        self.update_critic = conditional_gpu_logger(
+            strategy=self.config.strategy, role="dp critic", logger=logger
+        )(self.update_critic)
 
     def _forward_micro_batch(self, micro_batch):
         response_length = micro_batch["responses"].size(-1)
@@ -153,7 +165,6 @@ class DataParallelPPOCritic(BasePPOCritic):
             self.critic_optimizer.step()
         return grad_norm
 
-    @conditional_gpu_logger(condition=self.config.strategy, role="dp critic", logger=logger)
     def compute_values(self, data: DataProto) -> torch.Tensor:
         self.critic_module.eval()
         micro_batch_size = data.meta_info["micro_batch_size"]
@@ -204,7 +215,6 @@ class DataParallelPPOCritic(BasePPOCritic):
         values = values * response_mask # Only action tokens have values
         return values
 
-    @conditional_gpu_logger(condition=self.config.strategy, role="dp critic", logger=logger)
     def update_critic(self, data: DataProto):
         # make sure we are in training mode
         self.critic_module.train()

@@ -346,6 +346,7 @@ actor_rollout_ref:
 
   # Rollout model config.
   rollout:
+    strategy: xla
 
     # actor_rollout_ref.rollout.name: hf/vllm/sglang.
     name: vllm
