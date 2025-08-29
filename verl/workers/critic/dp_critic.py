@@ -252,10 +252,6 @@ class DataParallelPPOCritic(BasePPOCritic):
 
                 self.critic_optimizer.zero_grad(set_to_none=True)
 
-                print("CRITIC LENGTH MICROBATCHES", len(micro_batches))
-
-                print("CRITIC LENGTH MICROBATCHES", len(micro_batches))
-
                 for data in micro_batches:
                     # Support all devices
                     if isinstance(data, DataProto):
@@ -289,8 +285,8 @@ class DataParallelPPOCritic(BasePPOCritic):
                             loss = vf_loss / self.gradient_accumulation
 
                         loss.backward()
-                        # self.torch_xla.sync()
-
+                        if self.device_name == "xla":
+                            torch_xla.sync()
                     data = {
                         "critic/vf_loss": vf_loss.detach().item(),
                         "critic/vf_clipfrac": vf_clipfrac.detach().item(),
@@ -306,9 +302,9 @@ class DataParallelPPOCritic(BasePPOCritic):
                 append_to_dict(metrics, data)
             if self.device_name == "xla":
                 torch_xla.sync()
-            self.torch_xla.core.xla_model.wait_device_ops()
+                torch_xla.core.xla_model.wait_device_ops()
         self.critic_optimizer.zero_grad(set_to_none=True)
         if self.device_name == "xla":
             torch_xla.sync()
-        self.torch_xla.core.xla_model.wait_device_ops()
+            torch_xla.core.xla_model.wait_device_ops()
         return metrics

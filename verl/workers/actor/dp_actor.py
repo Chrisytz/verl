@@ -45,7 +45,6 @@ elif is_npu_available:
 else:
     try:
         import torch_xla
-        import torch_xla.distributed.spmd as xs
     except (ImportError, ModuleNotFoundError):
         print("Warning: torch_xla is not installed. Ignore this warning if not running on TPU.")
 
@@ -461,7 +460,8 @@ class DataParallelPPOActor(BasePPOActor):
                         else:
                             loss = policy_loss / self.gradient_accumulation
                         loss.backward()
-                        # self.torch_xla.sync()
+                        if self.device_name == "xla":
+                            torch_xla.sync()
                     data = {
                         "actor/pg_loss": pg_loss.detach().item(),
                         "actor/pg_clipfrac": pg_clipfrac.detach().item(),
@@ -477,9 +477,9 @@ class DataParallelPPOActor(BasePPOActor):
                 append_to_dict(metrics, data)
             if self.device_name == "xla":
                 torch_xla.sync()
-            self.torch_xla.core.xla_model.wait_device_ops()
+                torch_xla.core.xla_model.wait_device_ops()
         self.actor_optimizer.zero_grad(set_to_none=True)
         if self.device_name == "xla":
             torch_xla.sync()
-        self.torch_xla.core.xla_model.wait_device_ops()
+            torch_xla.core.xla_model.wait_device_ops()
         return metrics

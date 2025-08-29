@@ -92,7 +92,7 @@ data:
 actor_rollout_ref:
 
   # Whether it's a hybrid engine, currently only supports hybrid engine
-  hybrid_engine: false
+  hybrid_engine: true
 
   # common configs for the model
   model:
