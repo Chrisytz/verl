@@ -101,7 +101,6 @@ class RayResourcePool(ResourcePool):
         self.accelerator_type = accelerator_type
 
     def get_placement_groups(self, strategy="STRICT_PACK", name=None, device_name="tpu", num_accelerators=1):
-    def get_placement_groups(self, strategy="STRICT_PACK", name=None, device_name="tpu", num_accelerators=1):
         if self.pgs is not None:
             return self.pgs
 
