@@ -35,7 +35,7 @@ from verl.utils.py_functional import append_to_dict
 from verl.utils.seqlen_balancing import get_reverse_idx, rearrange_micro_batches
 from verl.utils.torch_functional import logprobs_from_logits
 from verl.utils.ulysses import gather_outpus_and_unpad, ulysses_pad, ulysses_pad_and_slice_inputs
-from verl.utils.tpu import shard_input_data, conditional_gpu_logger
+from verl.utils.tpu_utils import shard_input_data, conditional_gpu_logger
 from verl.workers.actor import BasePPOActor
 
 if is_cuda_available:
@@ -273,7 +273,6 @@ class DataParallelPPOActor(BasePPOActor):
             self.actor_optimizer.step()
         return grad_norm
 
-    @conditional_gpu_logger(condition=self.config.strategy, role="dp actor", logger=logger)
     def compute_log_prob(self, data: DataProto, calculate_entropy=False) -> torch.Tensor:
         """Compute the log probability of the responses given input_ids, attention_mask and position_ids
 
@@ -347,7 +346,6 @@ class DataParallelPPOActor(BasePPOActor):
 
         return log_probs, entropys
     
-    @conditional_gpu_logger(condition=self.config.strategy, role="dp actor", logger=logger)
     def update_policy(self, data: DataProto):
         # make sure we are in training mode
         self.actor_module.train()
