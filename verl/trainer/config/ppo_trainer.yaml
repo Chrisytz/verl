@@ -150,7 +150,7 @@ actor_rollout_ref:
     strategy: xla
 
     # Whether to enable fsdp mode on TPU
-    enable_fsdp_xla: True
+    enable_fsdp_xla: False
     
     # Split each sample into sub-batches of this size for PPO
     ppo_mini_batch_size: 256

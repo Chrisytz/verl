@@ -314,9 +314,10 @@ class RayPPOTrainer:
 
         self.hybrid_engine = config.actor_rollout_ref.hybrid_engine
         assert self.hybrid_engine or config.actor_rollout_ref.actor.enable_fsdp_xla, "Currently, only support hybrid engine or fsdp with xla"
+        assert self.hybrid_engine or config.actor_rollout_ref.actor.enable_fsdp_xla, "Currently, only support hybrid engine or fsdp with xla"
 
-        # if self.hybrid_engine:
-        #     assert Role.ActorRollout in role_worker_mapping, f"{role_worker_mapping.keys()=}"
+        if self.hybrid_engine:
+            assert Role.ActorRollout in role_worker_mapping, f"{role_worker_mapping.keys()=}"
 
         self.role_worker_mapping = role_worker_mapping
         self.resource_pool_manager = resource_pool_manager
@@ -641,9 +642,9 @@ class RayPPOTrainer:
             print(f"test_gen_batch meta info: {test_gen_batch.meta_info}")
 
             # pad to be divisible by dp_size
-            test_gen_batch_padded, pad_size = pad_dataproto_to_divisor(test_gen_batch, self.rollout_wg.world_size)
+            test_gen_batch_padded, pad_size = pad_dataproto_to_divisor(test_gen_batch, self._get_worker("rollout").world_size)
             if not self.async_rollout_mode:
-                test_output_gen_batch_padded = self.rollout_wg.generate_sequences(test_gen_batch_padded)
+                test_output_gen_batch_padded = self._get_worker("rollout").generate_sequences(test_gen_batch_padded)
             else:
                 self.async_rollout_manager.wake_up()
                 test_output_gen_batch_padded = self.async_rollout_manager.generate_sequences(test_gen_batch_padded)
@@ -720,22 +721,13 @@ class RayPPOTrainer:
 
         # create actor and rollout
         if self.hybrid_engine:
-            actor_resource_pool = self.resource_pool_manager.get_resource_pool(Role.Actor)
-            actor_cls = RayClassWithInitArgs(
-                cls=self.role_worker_mapping[Role.Actor],
+            resource_pool = self.resource_pool_manager.get_resource_pool(Role.ActorRollout)
+            actor_rollout_cls = RayClassWithInitArgs(
+                cls=self.role_worker_mapping[Role.ActorRollout],
                 config=self.config.actor_rollout_ref,
-                role="actor",
+                role="actor_rollout",
             )
-            self.resource_pool_to_cls[actor_resource_pool]["actor"] = actor_cls
-            
-            rollout_resource_pool = self.resource_pool_manager.get_resource_pool(Role.Rollout)
-            rollout_cls= RayClassWithInitArgs(
-                cls=self.role_worker_mapping[Role.Rollout],
-                config=self.config.actor_rollout_ref,
-                role="rollout",
-            )
-            self.resource_pool_to_cls[rollout_resource_pool]["rollout"] = rollout_cls 
-
+            self.resource_pool_to_cls[resource_pool]["actor_rollout"] = actor_rollout_cls
         else:
             actor_resource_pool = self.resource_pool_manager.get_resource_pool(Role.Actor)
             actor_cls = RayClassWithInitArgs(
@@ -781,7 +773,11 @@ class RayPPOTrainer:
         wg_kwargs = {}  # Setting up kwargs for RayWorkerGroup
         if OmegaConf.select(self.config.trainer, "ray_wait_register_center_timeout") is not None:
             wg_kwargs["ray_wait_register_center_timeout"] = self.config.trainer.ray_wait_register_center_timeout
-        
+
+        if self.config.actor_rollout_ref.actor.strategy == "xla":
+            wg_kwargs["enable_fsdp_xla"] = self.config.actor_rollout_ref.actor.enable_fsdp_xla
+            wg_kwargs["n_tpus"] = self.config.actor_rollout_ref.actor.fsdp_spmd_config.n_tpus
+
         for resource_pool, class_dict in self.resource_pool_to_cls.items():
             if len(class_dict) > 1:
                 # Multiple roles in the same resource pool, fuse them
@@ -810,11 +806,14 @@ class RayPPOTrainer:
 
         # we should create rollout at the end so that vllm can have a better estimation of kv cache memory
         if self.hybrid_engine:
+            self.actor_rollout_wg = all_wg["actor_rollout"]
+            self.actor_rollout_wg.init_model()
+        else:
             self.actor_wg = all_wg["actor"]
-        self.actor_wg.init_model()
+            self.actor_wg.init_model()
 
-        self.rollout_wg = all_wg["rollout"]
-        self.rollout_wg.init_model(actor_cls=self.actor_wg)
+            self.rollout_wg = all_wg["rollout"]
+            self.rollout_wg.init_model(actor_cls=self.actor_wg)
 
         # create async rollout manager and request scheduler
         self.async_rollout_mode = False
@@ -842,7 +841,7 @@ class RayPPOTrainer:
         max_actor_ckpt_to_keep = self.config.trainer.get("max_actor_ckpt_to_keep", None) if not remove_previous_ckpt_in_save else 1
         max_critic_ckpt_to_keep = self.config.trainer.get("max_critic_ckpt_to_keep", None) if not remove_previous_ckpt_in_save else 1
 
-        self.actor_wg.save_checkpoint(actor_local_path, actor_remote_path, self.global_steps, max_ckpt_to_keep=max_actor_ckpt_to_keep)
+        self._get_worker("actor").save_checkpoint(actor_local_path, actor_remote_path, self.global_steps, max_ckpt_to_keep=max_actor_ckpt_to_keep)
 
         if self.use_critic:
             critic_local_path = os.path.join(local_global_step_folder, "critic")
@@ -897,7 +896,7 @@ class RayPPOTrainer:
         actor_path = os.path.join(global_step_folder, "actor")
         critic_path = os.path.join(global_step_folder, "critic")
         # load actor
-        self.actor_wg.load_checkpoint(actor_path, del_local_after_load=self.config.trainer.del_local_ckpt_after_load)
+        self._get_worker("actor").load_checkpoint(actor_path, del_local_after_load=self.config.trainer.del_local_ckpt_after_load)
         # load critic
         if self.use_critic:
             self.critic_wg.load_checkpoint(critic_path, del_local_after_load=self.config.trainer.del_local_ckpt_after_load)
@@ -916,7 +915,7 @@ class RayPPOTrainer:
         attention_mask = batch.batch["attention_mask"]
         batch_size = attention_mask.shape[0]
         global_seqlen_lst = batch.batch["attention_mask"].view(batch_size, -1).sum(-1).tolist()  # (train_batch_size,)
-        world_size = self.actor_wg.world_size
+        world_size = self._get_worker("actor").world_size
         global_partition_lst = get_seqlen_balanced_partitions(global_seqlen_lst, k_partitions=world_size, equal_size=True)
         # reorder based on index. The data will be automatically equally partitioned by dispatch function
         global_idx = torch.tensor([j for partition in global_partition_lst for j in partition])
@@ -990,7 +989,7 @@ class RayPPOTrainer:
                     # generate a batch
                     with _timer("gen", timing_raw):
                         if not self.async_rollout_mode:
-                            gen_batch_output = self.rollout_wg.generate_sequences(gen_batch)
+                            gen_batch_output = self._get_worker("rollout").generate_sequences(gen_batch)
                         else:
                             self.async_rollout_manager.wake_up()
                             gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch)
@@ -1002,7 +1001,7 @@ class RayPPOTrainer:
                         with _timer("gen_max", timing_raw):
                             gen_baseline_batch = deepcopy(gen_batch)
                             gen_baseline_batch.meta_info["do_sample"] = False
-                            gen_baseline_output = self.rollout_wg.generate_sequences(gen_baseline_batch)
+                            gen_baseline_output = self._get_worker("rollout").generate_sequences(gen_baseline_batch)
 
                             batch = batch.union(gen_baseline_output)
                             reward_baseline_tensor = self.reward_fn(batch)
@@ -1044,7 +1043,7 @@ class RayPPOTrainer:
 
                     # recompute old_log_probs
                     with _timer("old_log_prob", timing_raw):
-                        old_log_prob = self.actor_wg.compute_log_prob(batch)
+                        old_log_prob = self._get_worker("actor").compute_log_prob(batch)
                         entropys = old_log_prob.batch["entropys"]
                         response_masks = batch.batch["response_mask"]
                         loss_agg_mode = self.config.actor_rollout_ref.actor.loss_agg_mode
@@ -1084,7 +1083,7 @@ class RayPPOTrainer:
                             if not self.ref_in_actor:
                                 ref_log_prob = self.ref_policy_wg.compute_ref_log_prob(batch)
                             else:
-                                ref_log_prob = self.actor_wg.compute_ref_log_prob(batch)
+                                ref_log_prob = self._get_worker("actor").compute_ref_log_prob(batch)
                             batch = batch.union(ref_log_prob)
 
                     # compute values
@@ -1137,7 +1136,7 @@ class RayPPOTrainer:
                         # update actor
                         with _timer("update_actor", timing_raw):
                             batch.meta_info["multi_turn"] = self.config.actor_rollout_ref.rollout.multi_turn.enable
-                            actor_output = self.actor_wg.update_actor(batch)
+                            actor_output = self._get_worker("actor").update_actor(batch)
                         actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
                         metrics.update(actor_output_metrics)
 
