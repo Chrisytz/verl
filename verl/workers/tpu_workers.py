@@ -205,11 +205,8 @@ class ActorRolloutRefWorker(Worker):
         actor_module.to(get_torch_device().current_device())
 
         actor_module.to(torch_dtype)
-
-        if self.rank == 0:
-            print_model_size(actor_module)
         
-        if self._is_actor:
+        if self._is_actor and self.config.actor.enable_fsdp_xla:
             xr.use_spmd()
             num_devices = xr.global_runtime_device_count()
             mesh_shape = (num_devices, 1)
@@ -262,9 +259,6 @@ class ActorRolloutRefWorker(Worker):
         return actor_module, actor_optimizer, actor_lr_scheduler, actor_model_config
 
     def _build_rollout(self, trust_remote_code=False):
-
-        infer_tp = self.config.rollout.tensor_model_parallel_size
-        # assert self.world_size % infer_tp == 0, f"rollout world_size: {self.world_size} is not divisible by infer_tp: {infer_tp}"
 
         infer_tp = self.config.rollout.tensor_model_parallel_size
         assert self.world_size % infer_tp == 0, f"rollout world_size: {self.world_size} is not divisible by infer_tp: {infer_tp}"
@@ -356,13 +350,15 @@ class ActorRolloutRefWorker(Worker):
         # perform training
         with Timer(name="update_policy", logger=None) as timer:
             metrics = self.actor.update_policy(data=data)
-        # delta_time = timer.last
-        # global_num_tokens = data.meta_info["global_token_num"]
-        # estimated_flops, promised_flops = self.flops_counter.estimate_flops(global_num_tokens, delta_time)
-        # metrics["perf/mfu/actor"] = estimated_flops * self.config.actor.ppo_epochs / promised_flops / self.world_size
-        # metrics["perf/max_memory_allocated_gb"] = get_torch_device().max_memory_allocated() / (1024**3)
-        # metrics["perf/max_memory_reserved_gb"] = get_torch_device().max_memory_reserved() / (1024**3)
-        # metrics["perf/cpu_memory_used_gb"] = psutil.virtual_memory().used / (1024**3)
+        
+        if not self.config.actor.enable_fsdp_xla:
+            delta_time = timer.last
+            global_num_tokens = data.meta_info["global_token_num"]
+            estimated_flops, promised_flops = self.flops_counter.estimate_flops(global_num_tokens, delta_time)
+            metrics["perf/mfu/actor"] = estimated_flops * self.config.actor.ppo_epochs / promised_flops / self.world_size
+            metrics["perf/max_memory_allocated_gb"] = get_torch_device().max_memory_allocated() / (1024**3)
+            metrics["perf/max_memory_reserved_gb"] = get_torch_device().max_memory_reserved() / (1024**3)
+            metrics["perf/cpu_memory_used_gb"] = psutil.virtual_memory().used / (1024**3)
 
         lr = self.actor_lr_scheduler.get_last_lr()[0]
         metrics["actor/lr"] = lr
@@ -392,31 +388,13 @@ class ActorRolloutRefWorker(Worker):
                 params = self.actor_wg.get_state_dict()[0]
             else:
                 params = self.actor_module_fsdp.state_dict()
-                params = convert_weight_keys(params, getattr(self.actor_module_fsdp, "_orig_module", self.actor_module_fsdp))
+                params = convert_weight_keys(params, self.actor_module_fsdp)
 
             model = self.rollout.inference_engine.llm_engine.model_executor.driver_worker.model_runner.model
 
             # Create a list to hold the prepared parameters
-            prepared_params = []
-
-            # Loop through the parameters and prepare each one
-            for name, param in params.items():
-                if isinstance(param, DTensor):
-                    # For a DTensor, move it to the device and gather all the shards
-                    prepared_param = param.to(self.device_name, non_blocking=True).full_tensor()
-                else:
-                    # For a regular tensor, just use it directly
-                    prepared_param = param
-                
-                # Add the name and the prepared parameter to the list
-                prepared_params.append((name, prepared_param))
-
-            # Now, call load_weights on the prepared list
-            new_prepared_params = []
-            for prepared_param in prepared_params:
-                new_prepared_params.append((prepared_param[0].replace("_orig_module.",""), prepared_param[1]))
-            loaded_params = model.load_weights(new_prepared_params)
-            # loaded_params = model.load_weights(((name, param.to(self.device_name, non_blocking=True).full_tensor() if isinstance(param, DTensor) else param) for name, param in params.items()))
+            prepared_params = ((name, param.to(self.device_name, non_blocking=True).full_tensor() if isinstance(param, DTensor) else param) for name, param in params.items())
+            loaded_params = model.load_weights(((prepared_param[0].replace("_orig_module.",""), prepared_param[1]) for prepared_param in prepared_params))
             logger.info(f"vLLM load weights, loaded_params: {len(loaded_params) if loaded_params else -1}")
             output = self.rollout.generate_sequences(prompts=prompts)
 
@@ -437,8 +415,6 @@ class ActorRolloutRefWorker(Worker):
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def compute_log_prob(self, data: DataProto):
         assert self._is_actor
-
-        output = data
         # Support all hardwares
         data = data.to(get_torch_device().current_device())
         # we should always recompute old_log_probs when it is HybridEngine
@@ -557,16 +533,22 @@ class CriticWorker(Worker):
         # some parameters may not in torch_dtype
         critic_module.to(torch_dtype)
 
-        if self.rank == 0:
-            print_model_size(critic_module)
+        if self.config.enable_fsdp_xla:
+            xr.use_spmd()
+            num_devices = xr.global_runtime_device_count()
+            mesh_shape = (num_devices, 1)
+            device_ids = np.array(range(num_devices))
+            # To be noted, the mesh must have an axis named 'fsdp', which the weights and activations will be sharded on.
+            mesh = xs.Mesh(device_ids, mesh_shape, ('fsdp', 'model'))
+            xs.set_global_mesh(mesh)
 
-        auto_wrap_policy = functools.partial(
-            transformer_auto_wrap_policy,
-            transformer_layer_cls={
-                Qwen2DecoderLayer
-            },
-        )
-        critic_module = FSDPv2(critic_module, auto_wrap_policy=auto_wrap_policy, shard_output=custom_shard_output_impl)
+            auto_wrap_policy = functools.partial(
+                transformer_auto_wrap_policy,
+                transformer_layer_cls={
+                    Qwen2DecoderLayer
+                },
+            )
+            critic_module = FSDPv2(critic_module, auto_wrap_policy=auto_wrap_policy, shard_output=custom_shard_output_impl)
 
         self.critic_model_config = critic_model_config
 
@@ -600,13 +582,6 @@ class CriticWorker(Worker):
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def init_model(self):
-        xr.use_spmd()
-        num_devices = xr.global_runtime_device_count()
-        mesh_shape = (num_devices, 1)
-        device_ids = np.array(range(num_devices))
-        # To be noted, the mesh must have an axis named 'fsdp', which the weights and activations will be sharded on.
-        mesh = xs.Mesh(device_ids, mesh_shape, ('fsdp', 'model'))
-        xs.set_global_mesh(mesh)
         # This is used to import external_lib into the huggingface systems
         import_external_libs(self.config.model.get("external_lib", None))
 

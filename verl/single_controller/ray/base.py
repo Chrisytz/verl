@@ -101,6 +101,7 @@ class RayResourcePool(ResourcePool):
         self.accelerator_type = accelerator_type
 
     def get_placement_groups(self, strategy="STRICT_PACK", name=None, device_name="tpu", num_accelerators=1):
+    def get_placement_groups(self, strategy="STRICT_PACK", name=None, device_name="tpu", num_accelerators=1):
         if self.pgs is not None:
             return self.pgs
 
@@ -113,9 +114,9 @@ class RayResourcePool(ResourcePool):
         elif device_name == "tpu":
             device_name = "TPU"
 
-        bundle = {"CPU": 1}
+        bundle = {"CPU": self.max_colocate_count}
         if self.use_accelerator:
-            bundle[device_name] = 4
+            bundle[device_name] = num_accelerators
             if self.accelerator_type is not None:
                 bundle[self.accelerator_type] = 1e-4
 
@@ -123,7 +124,7 @@ class RayResourcePool(ResourcePool):
 
         lifetime = "detached" if self.detached else None
 
-        pgs = [placement_group(bundles=bundles, strategy="SPREAD", name=pg_name_prefix + str(idx), lifetime=lifetime) for idx, bundles in enumerate(pg_scheme)]
+        pgs = [placement_group(bundles=bundles, strategy=strategy, name=pg_name_prefix + str(idx), lifetime=lifetime) for idx, bundles in enumerate(pg_scheme)]
 
         ray.get([pg.ready() for pg in pgs])
 
@@ -220,7 +221,7 @@ class RayClassWithInitArgs(ClassWithInitArgs):
         if use_accelerator and device_name == "npu":
             options["resources"] = {"NPU": num_accelerators}
         if use_accelerator and device_name == "tpu":
-            options["resources"] = {"TPU": 4}
+            options["resources"] = {"TPU": num_accelerators}
 
         if len(self._additional_resource) > 1:
             for k, v in self._additional_resource.items():
@@ -334,7 +335,7 @@ class RayWorkerGroup(WorkerGroup):
             strategy = "SPREAD"
             num_accelerators = self.n_tpus
 
-        pgs = resource_pool.get_placement_groups(strategy=strategy, device_name=self.device_name, num_accelerators=num_accelerators)
+        pgs = resource_pool.get_placement_groups(strategy=strategy, device_name=self.device_name)
         world_size = resource_pool.world_size
         self._world_size = world_size
         # cia.add_kwarg("_world_size", world_size)
