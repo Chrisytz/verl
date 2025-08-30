@@ -100,7 +100,7 @@ class RayResourcePool(ResourcePool):
         self.detached = detached
         self.accelerator_type = accelerator_type
 
-    def get_placement_groups(self, strategy="STRICT_PACK", name=None, device_name="tpu"):
+    def get_placement_groups(self, strategy="STRICT_PACK", name=None, device_name="tpu", num_accelerators=1):
         if self.pgs is not None:
             return self.pgs
 
@@ -115,7 +115,7 @@ class RayResourcePool(ResourcePool):
 
         bundle = {"CPU": self.max_colocate_count}
         if self.use_accelerator:
-            bundle[device_name] = 1
+            bundle[device_name] = num_accelerators
             if self.accelerator_type is not None:
                 bundle[self.accelerator_type] = 1e-4
 
@@ -274,6 +274,8 @@ class RayWorkerGroup(WorkerGroup):
         # if a WorkerGroup is spawned from Colocate WorkerGroup, this indicates which sub-class is binded to this WorkerGroup.
         self.sub_cls_name = ""
         self.device_name = device_name
+        self.enable_fsdp_xla = kwargs.get("enable_fsdp_xla", False)
+        self.n_tpus = kwargs.get("n_tpus", 0)
 
         if worker_names is not None and (not self.fused_worker_used):
             assert self._is_init_with_detached_workers
@@ -325,11 +327,17 @@ class RayWorkerGroup(WorkerGroup):
         strategy = "PACK"
         if bin_pack:
             strategy = "STRICT_PACK"
-        pgs = resource_pool.get_placement_groups(strategy=strategy, device_name=self.device_name)
+        
+        num_accelerators = 1 / resource_pool.max_colocate_count
+
+        if self.enable_fsdp_xla:
+            strategy = "SPREAD"
+            num_accelerators = self.n_tpus
+
+        pgs = resource_pool.get_placement_groups(strategy=strategy, device_name=self.device_name, num_accelerators=num_accelerators)
         world_size = resource_pool.world_size
         self._world_size = world_size
         # cia.add_kwarg("_world_size", world_size)
-        num_accelerators = 1 / resource_pool.max_colocate_count
 
         rank = -1
         local_world_size = resource_pool.store[0]
