@@ -114,21 +114,43 @@ class TaskRunner:
         from verl.trainer.ppo.ray_trainer import ResourcePoolManager, Role
 
         # Map roles to their corresponding remote worker classes.
-        role_worker_mapping = {
-            Role.ActorRollout: ray.remote(actor_rollout_cls),
-            Role.Critic: ray.remote(CriticWorker),
-        }
+        if config.actor_rollout_ref.actor.strategy == "xla" and config.actor_rollout_ref.actor.enable_fsdp_xla:
+            role_worker_mapping = {
+                Role.Actor: ray.remote(actor_rollout_cls),
+                Role.Rollout: ray.remote(actor_rollout_cls),
+                Role.Critic: ray.remote(CriticWorker),
+            }
+            
+            actor_critic_pool_id = "actor_critic_pool"
+            rollout_pool_id = "rollout_pool"
 
-        # Define the resource pool specification.
-        # Map roles to the resource pool.
-        global_pool_id = "global_pool"
-        resource_pool_spec = {
-            global_pool_id: [config.trainer.n_gpus_per_node if config.trainer.device == "cuda" else config.trainer.n_tpus_per_node] * config.trainer.nnodes,
-        }
-        mapping = {
-            Role.ActorRollout: global_pool_id,
-            Role.Critic: global_pool_id,
-        }
+            resource_pool_spec = {
+                actor_critic_pool_id: [config.trainer.n_tpus_per_node] * config.trainer.nnodes,
+                rollout_pool_id: [config.trainer.n_tpus_per_node] * config.trainer.nnodes,
+            }
+
+            mapping = {
+                Role.Actor: actor_critic_pool_id,
+                Role.Rollout: rollout_pool_id,
+                Role.Critic: actor_critic_pool_id,
+            }
+
+        else:
+            role_worker_mapping = {
+                Role.ActorRollout: ray.remote(actor_rollout_cls),
+                Role.Critic: ray.remote(CriticWorker),
+            }
+
+            global_pool_id = "global_pool"
+        
+            resource_pool_spec = {
+                global_pool_id: [config.trainer.n_gpus_per_node if config.trainer.device == "cuda" else config.trainer.n_tpus_per_node] * config.trainer.nnodes,
+            }
+
+            mapping = {
+                Role.ActorRollout: global_pool_id,
+                Role.Critic: global_pool_id,
+            }
 
         # We should adopt a multi-source reward function here:
         # - for rule-based rm, we directly call a reward score

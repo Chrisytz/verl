@@ -18,6 +18,7 @@ The main entry point to run the PPO algorithm
 import logging
 import os
 import warnings
+import json
 
 import psutil
 import torch
@@ -26,7 +27,7 @@ from omegaconf import DictConfig
 
 from verl import DataProto
 from verl.single_controller.base import Worker
-from verl.single_controller.base.decorator import Dispatch, register
+from verl.single_controller.base.decorator import Dispatch, register, Execute
 from verl.utils import hf_processor, hf_tokenizer
 from verl.utils.debug.performance import _timer, reduce_timing
 from verl.utils.device import get_device_name, get_torch_device
@@ -35,10 +36,45 @@ from verl.utils.fs import copy_to_local
 from verl.utils.import_utils import import_external_libs
 from verl.utils.model import convert_weight_keys
 from torch.distributed.tensor import DTensor
+import numpy as np
 import torch_xla.core.xla_model as xm
+import torch_xla.distributed.spmd as xs
+import torch_xla.runtime as xr
+from torch_xla.experimental.spmd_fully_sharded_data_parallel import SpmdFullyShardedDataParallel as FSDPv2
+from torch_xla.experimental.spmd_fully_sharded_data_parallel import _prepare_spmd_partition_spec
+from torch_xla.distributed.fsdp.wrap import transformer_auto_wrap_policy
+import functools
+from transformers.models.qwen2.modeling_qwen2 import Qwen2DecoderLayer
+from transformers.modeling_outputs import CausalLMOutputWithPast
+from transformers.modeling_outputs import TokenClassifierOutput
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+
+def custom_shard_output_impl(output, mesh):
+    import torch_xla
+    real_output = None
+    if isinstance(output, torch.Tensor):
+        real_output = output
+    elif isinstance(output, CausalLMOutputWithPast):
+        real_output = output.logits
+    elif isinstance(output, TokenClassifierOutput):
+          real_output = output.logits
+    elif isinstance(output, tuple):
+        real_output = output[0] if isinstance(output[0], torch.Tensor) else None
+        warnings.warn(
+            f"The output is a tuple, but only the first element is sharded. If this is not intended, please provide your own shard_output callable. {len(output)}    {real_output.shape}"
+        )
+   
+    if real_output is None:
+        raise RuntimeError(
+            f"The output type is not supported: {type(output)}. Please provide your own shard_output callable."
+        )
+
+    if not torch_xla._XLAC._get_xla_sharding_spec(real_output):
+        xs.mark_sharding(
+            real_output, mesh, ("fsdp", None, None))
+
 
 
 class ActorRolloutRefWorker(Worker):
@@ -72,6 +108,8 @@ class ActorRolloutRefWorker(Worker):
             if self.config.actor.ppo_micro_batch_size_per_gpu is not None:
                 assert self.config.actor.ppo_mini_batch_size % self.config.actor.ppo_micro_batch_size_per_gpu == 0, f"normalized ppo_mini_batch_size {self.config.actor.ppo_mini_batch_size} should be divisible by ppo_micro_batch_size_per_gpu {self.config.actor.ppo_micro_batch_size_per_gpu}"
                 assert self.config.actor.ppo_mini_batch_size // self.config.actor.ppo_micro_batch_size_per_gpu > 0, f"normalized ppo_mini_batch_size {self.config.actor.ppo_mini_batch_size} should be larger than ppo_micro_batch_size_per_gpu {self.config.actor.ppo_micro_batch_size_per_gpu}"
+            
+
 
         # normalize rollout config
         if self._is_rollout and self.config.rollout.log_prob_micro_batch_size is not None:
@@ -143,9 +181,23 @@ class ActorRolloutRefWorker(Worker):
         actor_module.to(get_torch_device().current_device())
 
         actor_module.to(torch_dtype)
-
-        if self.rank == 0:
-            print_model_size(actor_module)
+        
+        if self._is_actor and self.config.actor.enable_fsdp_xla:
+            xr.use_spmd()
+            num_devices = xr.global_runtime_device_count()
+            mesh_shape = (num_devices, 1)
+            device_ids = np.array(range(num_devices))
+            # To be noted, the mesh must have an axis named 'fsdp', which the weights and activations will be sharded on.
+            mesh = xs.Mesh(device_ids, mesh_shape, ('fsdp', 'model'))
+            xs.set_global_mesh(mesh)
+            
+            auto_wrap_policy = functools.partial(
+                transformer_auto_wrap_policy,
+                transformer_layer_cls={
+                    Qwen2DecoderLayer
+                },
+            )
+            actor_module = FSDPv2(actor_module, auto_wrap_policy=auto_wrap_policy, shard_output=custom_shard_output_impl)
 
         if role == "actor" and optim_config is not None:
             from verl.utils.torch_functional import get_constant_schedule_with_warmup, get_cosine_schedule_with_warmup
@@ -183,6 +235,9 @@ class ActorRolloutRefWorker(Worker):
         return actor_module, actor_optimizer, actor_lr_scheduler, actor_model_config
 
     def _build_rollout(self, trust_remote_code=False):
+
+        infer_tp = self.config.rollout.tensor_model_parallel_size
+        assert self.world_size % infer_tp == 0, f"rollout world_size: {self.world_size} is not divisible by infer_tp: {infer_tp}"
         rollout_name = self.config.rollout.name
         assert rollout_name == "vllm"
 
@@ -199,7 +254,7 @@ class ActorRolloutRefWorker(Worker):
         return rollout
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
-    def init_model(self):
+    def init_model(self, actor_cls=None):
         from verl.workers.actor import DataParallelPPOActor
 
         # This is used to import external_lib into the huggingface systems
@@ -257,26 +312,28 @@ class ActorRolloutRefWorker(Worker):
 
         if self._is_actor:
             self.flops_counter = FlopsCounter(self.actor_model_config)
-
+        
+        self.actor_wg = actor_cls
         #TODO: create a checkpoint manager to allow loading checkpoints for rollout
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def update_actor(self, data: DataProto):
         # Support all hardwares
         data = data.to(get_torch_device().current_device())  # data will to device with each micro batch on actor.update_policy
-
         assert self._is_actor
 
         # perform training
         with Timer(name="update_policy", logger=None) as timer:
             metrics = self.actor.update_policy(data=data)
-        delta_time = timer.last
-        global_num_tokens = data.meta_info["global_token_num"]
-        estimated_flops, promised_flops = self.flops_counter.estimate_flops(global_num_tokens, delta_time)
-        metrics["perf/mfu/actor"] = estimated_flops * self.config.actor.ppo_epochs / promised_flops / self.world_size
-        metrics["perf/max_memory_allocated_gb"] = get_torch_device().max_memory_allocated() / (1024**3)
-        metrics["perf/max_memory_reserved_gb"] = get_torch_device().max_memory_reserved() / (1024**3)
-        metrics["perf/cpu_memory_used_gb"] = psutil.virtual_memory().used / (1024**3)
+        
+        if not self.config.actor.enable_fsdp_xla:
+            delta_time = timer.last
+            global_num_tokens = data.meta_info["global_token_num"]
+            estimated_flops, promised_flops = self.flops_counter.estimate_flops(global_num_tokens, delta_time)
+            metrics["perf/mfu/actor"] = estimated_flops * self.config.actor.ppo_epochs / promised_flops / self.world_size
+            metrics["perf/max_memory_allocated_gb"] = get_torch_device().max_memory_allocated() / (1024**3)
+            metrics["perf/max_memory_reserved_gb"] = get_torch_device().max_memory_reserved() / (1024**3)
+            metrics["perf/cpu_memory_used_gb"] = psutil.virtual_memory().used / (1024**3)
 
         lr = self.actor_lr_scheduler.get_last_lr()[0]
         metrics["actor/lr"] = lr
@@ -302,10 +359,17 @@ class ActorRolloutRefWorker(Worker):
         timing_generate = {}
 
         with _timer("generate_sequences", timing_generate):
-            params = self.actor_module_fsdp.state_dict()
-            params = convert_weight_keys(params, self.actor_module_fsdp)
+            if self.actor_wg is not None:
+                params = self.actor_wg.get_state_dict()[0]
+            else:
+                params = self.actor_module_fsdp.state_dict()
+                params = convert_weight_keys(params, self.actor_module_fsdp)
+
             model = self.rollout.inference_engine.llm_engine.model_executor.driver_worker.model_runner.model
-            loaded_params = model.load_weights(((name, param.to(self.device_name, non_blocking=True).full_tensor() if isinstance(param, DTensor) else param) for name, param in params.items()))
+
+            # Create a list to hold the prepared parameters
+            prepared_params = ((name, param.to(self.device_name, non_blocking=True).full_tensor() if isinstance(param, DTensor) else param) for name, param in params.items())
+            loaded_params = model.load_weights(((prepared_param[0].replace("_orig_module.",""), prepared_param[1]) for prepared_param in prepared_params))
             logger.info(f"vLLM load weights, loaded_params: {len(loaded_params) if loaded_params else -1}")
             output = self.rollout.generate_sequences(prompts=prompts)
 
@@ -315,11 +379,17 @@ class ActorRolloutRefWorker(Worker):
         # clear kv cache
         get_torch_device().empty_cache()
         return output
-
+    
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=True)
+    def get_state_dict(self):
+        assert self._is_actor
+        params = self.actor_module_fsdp.state_dict()
+        params = convert_weight_keys(params, getattr(self.actor_module_fsdp, "_orig_module", self.actor_module_fsdp))
+        return params
+    
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def compute_log_prob(self, data: DataProto):
         assert self._is_actor
-
         # Support all hardwares
         data = data.to(get_torch_device().current_device())
         # we should always recompute old_log_probs when it is HybridEngine
@@ -445,8 +515,15 @@ class CriticWorker(Worker):
         # some parameters may not in torch_dtype
         critic_module.to(torch_dtype)
 
-        if self.rank == 0:
-            print_model_size(critic_module)
+        if self.config.enable_fsdp_xla:
+
+            auto_wrap_policy = functools.partial(
+                transformer_auto_wrap_policy,
+                transformer_layer_cls={
+                    Qwen2DecoderLayer
+                },
+            )
+            critic_module = FSDPv2(critic_module, auto_wrap_policy=auto_wrap_policy, shard_output=custom_shard_output_impl)
 
         self.critic_model_config = critic_model_config
 
@@ -480,6 +557,13 @@ class CriticWorker(Worker):
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def init_model(self):
+        xr.use_spmd()
+        num_devices = xr.global_runtime_device_count()
+        mesh_shape = (num_devices, 1)
+        device_ids = np.array(range(num_devices))
+        # To be noted, the mesh must have an axis named 'fsdp', which the weights and activations will be sharded on.
+        mesh = xs.Mesh(device_ids, mesh_shape, ('fsdp', 'model'))
+        xs.set_global_mesh(mesh)
         # This is used to import external_lib into the huggingface systems
         import_external_libs(self.config.model.get("external_lib", None))
 
@@ -534,4 +618,3 @@ class CriticWorker(Worker):
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def save_checkpoint(self, local_path, remote_path=None, global_step=0, max_ckpt_to_keep=None):
         pass
-
