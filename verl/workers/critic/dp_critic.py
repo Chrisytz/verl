@@ -50,10 +50,6 @@ else:
     except (ImportError, ModuleNotFoundError):
         print("Warning: torch_xla is not installed. Ignore this warning if not running on TPU.")
 
-import torch_xla.distributed.spmd as xs
-
-import torch_xla.distributed.spmd as xs
-
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
