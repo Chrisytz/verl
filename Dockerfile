@@ -20,7 +20,6 @@ WORKDIR /workspaces
 # The `requirements/tpu.txt` will use the torch/torch-xla from the base image.
 RUN git clone https://github.com/vllm-project/vllm.git
 WORKDIR /workspaces/vllm
-# RUN git checkout c86af22f31838ee654c856279ac5110ae3fdb2cc
 RUN pip install -r requirements/tpu.txt
 RUN apt-get install libopenblas-base libopenmpi-dev libomp-dev
 RUN VLLM_TARGET_DEVICE="tpu" python setup.py develop
