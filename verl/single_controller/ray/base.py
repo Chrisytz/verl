@@ -334,7 +334,7 @@ class RayWorkerGroup(WorkerGroup):
             strategy = "SPREAD"
             num_accelerators = self.n_tpus
 
-        pgs = resource_pool.get_placement_groups(strategy=strategy, device_name=self.device_name)
+        pgs = resource_pool.get_placement_groups(strategy=strategy, device_name=self.device_name, num_accelerators=num_accelerators)
         world_size = resource_pool.world_size
         self._world_size = world_size
         # cia.add_kwarg("_world_size", world_size)

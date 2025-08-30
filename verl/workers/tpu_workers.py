@@ -28,7 +28,6 @@ from omegaconf import DictConfig
 from verl import DataProto
 from verl.single_controller.base import Worker
 from verl.single_controller.base.decorator import Dispatch, register, Execute
-from verl.single_controller.base.decorator import Dispatch, register, Execute
 from verl.utils import hf_processor, hf_tokenizer
 from verl.utils.debug.performance import _timer, reduce_timing
 from verl.utils.device import get_device_name, get_torch_device
@@ -75,30 +74,6 @@ def custom_shard_output_impl(output, mesh):
         xs.mark_sharding(
             real_output, mesh, ("fsdp", None, None))
 
-def custom_shard_output_impl(output, mesh):
-    import torch_xla
-    real_output = None
-    if isinstance(output, CausalLMOutputWithPast):
-        real_output = output.logits
-    elif isinstance(output, TokenClassifierOutput):
-          real_output = output.logits
-    elif isinstance(output, tuple):
-        real_output = output[0] if isinstance(output[0], torch.Tensor) else None
-        warnings.warn(
-            "The output is a tuple, but only the first element is sharded. If this is not intended, please provide your own shard_output callable."
-        )
-    
-    if real_output is None:
-        raise RuntimeError(
-            f"The output type is not supported: {type(output)}. Please provide your own shard_output callable."
-        )
-
-    print("prepare spmd partition spec", _prepare_spmd_partition_spec(real_output))
-
-    if not torch_xla._XLAC._get_xla_sharding_spec(real_output):
-        xs.mark_sharding(
-            real_output, mesh,
-            _prepare_spmd_partition_spec(real_output))
 
 
 class ActorRolloutRefWorker(Worker):
@@ -278,7 +253,6 @@ class ActorRolloutRefWorker(Worker):
         return rollout
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
-    def init_model(self, actor_cls=None):
     def init_model(self, actor_cls=None):
         from verl.workers.actor import DataParallelPPOActor
 
@@ -534,13 +508,6 @@ class CriticWorker(Worker):
         critic_module.to(torch_dtype)
 
         if self.config.enable_fsdp_xla:
-            xr.use_spmd()
-            num_devices = xr.global_runtime_device_count()
-            mesh_shape = (num_devices, 1)
-            device_ids = np.array(range(num_devices))
-            # To be noted, the mesh must have an axis named 'fsdp', which the weights and activations will be sharded on.
-            mesh = xs.Mesh(device_ids, mesh_shape, ('fsdp', 'model'))
-            xs.set_global_mesh(mesh)
 
             auto_wrap_policy = functools.partial(
                 transformer_auto_wrap_policy,
@@ -582,6 +549,13 @@ class CriticWorker(Worker):
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def init_model(self):
+        xr.use_spmd()
+        num_devices = xr.global_runtime_device_count()
+        mesh_shape = (num_devices, 1)
+        device_ids = np.array(range(num_devices))
+        # To be noted, the mesh must have an axis named 'fsdp', which the weights and activations will be sharded on.
+        mesh = xs.Mesh(device_ids, mesh_shape, ('fsdp', 'model'))
+        xs.set_global_mesh(mesh)
         # This is used to import external_lib into the huggingface systems
         import_external_libs(self.config.model.get("external_lib", None))
 
