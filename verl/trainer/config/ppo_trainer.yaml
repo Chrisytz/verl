@@ -284,11 +284,8 @@ actor_rollout_ref:
     # configs for FSDP via SPMD in PyTorch/XLA
     fsdp_spmd_config:
 
-
+      # number of TPUs to shard across
       n_tpus: 4
-
-
-
 
   # Reference model config.
   # Reference model will be enabled when actor.use_kl_loss or/and algorithm.use_kl_in_reward is/are True.

@@ -477,7 +477,6 @@ class DataParallelPPOActor(BasePPOActor):
                 append_to_dict(metrics, data)
             if self.device_name == "xla":
                 torch_xla.sync()
-                torch_xla.core.xla_model.wait_device_ops()
         self.actor_optimizer.zero_grad(set_to_none=True)
         if self.device_name == "xla":
             torch_xla.sync()
