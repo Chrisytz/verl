@@ -1162,7 +1162,13 @@ class RayPPOTrainer:
                             val_metrics: dict = self._validate()
                             if is_last_step:
                                 last_val_metrics = val_metrics
+
                         metrics.update(val_metrics)
+                    
+                    # save checkpoint
+                    if self.config.trainer.save_freq > 0 and (is_last_step or self.global_steps % self.config.trainer.save_freq == 0):
+                        with _timer("save_checkpoint", timing_raw):
+                            self._save_checkpoint()
 
                 # training metrics
                 metrics.update(
