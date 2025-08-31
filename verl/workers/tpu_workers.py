@@ -512,7 +512,6 @@ class CriticWorker(Worker):
         critic_module.to(torch_dtype)
 
         if self.config.enable_fsdp_xla:
-
             auto_wrap_policy = functools.partial(
                 transformer_auto_wrap_policy,
                 transformer_layer_cls={
@@ -561,7 +560,7 @@ class CriticWorker(Worker):
             # To be noted, the mesh must have an axis named 'fsdp', which the weights and activations will be sharded on.
             mesh = xs.Mesh(device_ids, mesh_shape, ('fsdp', 'model'))
             xs.set_global_mesh(mesh)
-            
+
         # This is used to import external_lib into the huggingface systems
         import_external_libs(self.config.model.get("external_lib", None))
 
