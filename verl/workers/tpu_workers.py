@@ -553,13 +553,15 @@ class CriticWorker(Worker):
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def init_model(self):
-        xr.use_spmd()
-        num_devices = xr.global_runtime_device_count()
-        mesh_shape = (num_devices, 1)
-        device_ids = np.array(range(num_devices))
-        # To be noted, the mesh must have an axis named 'fsdp', which the weights and activations will be sharded on.
-        mesh = xs.Mesh(device_ids, mesh_shape, ('fsdp', 'model'))
-        xs.set_global_mesh(mesh)
+        if self.config.enable_fsdp_xla: 
+            xr.use_spmd()
+            num_devices = xr.global_runtime_device_count()
+            mesh_shape = (num_devices, 1)
+            device_ids = np.array(range(num_devices))
+            # To be noted, the mesh must have an axis named 'fsdp', which the weights and activations will be sharded on.
+            mesh = xs.Mesh(device_ids, mesh_shape, ('fsdp', 'model'))
+            xs.set_global_mesh(mesh)
+            
         # This is used to import external_lib into the huggingface systems
         import_external_libs(self.config.model.get("external_lib", None))
 
